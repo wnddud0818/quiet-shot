@@ -14,9 +14,11 @@ struct ZoomControl: View {
     @State private var dragStartDisplay: CGFloat?
     @State private var lastDetent: CGFloat?
     @State private var hideTask: Task<Void, Never>?
+    /// 다이얼을 끌고 손을 뗄 때 그 아래 버튼이 눌린 것으로 처리되어 배율이 튀는 것을 막기 위함
+    @State private var lastDragEnd = Date.distantPast
 
-    /// 드래그 거리 → 배율 감도 (이만큼 끌면 2배)
-    private let pointsPerDoubling: CGFloat = 90
+    /// 드래그 거리 → 배율 감도 (이만큼 끌면 2배). 사이 배율을 고르기 쉽도록 넉넉하게
+    private let pointsPerDoubling: CGFloat = 130
 
     private var minDisplay: CGFloat { configuration.display(for: configuration.minFactor) }
     private var maxDisplay: CGFloat { configuration.display(for: configuration.maxFactor) }
@@ -31,7 +33,7 @@ struct ZoomControl: View {
                     presets: configuration.presets.map(\.display),
                     pointsPerDoubling: pointsPerDoubling
                 )
-                .frame(height: 58)
+                .frame(height: 78)
                 .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottom)))
             }
             presetRow
@@ -50,6 +52,8 @@ struct ZoomControl: View {
                     ForEach(presets) { preset in
                         let selected = preset.id == selectedPreset?.id
                         Button {
+                            // 다이얼을 끄는 중이거나 방금 놓았으면 무시 (사이 배율 유지)
+                            guard dragStartDisplay == nil, Date().timeIntervalSince(lastDragEnd) > 0.35 else { return }
                             Haptics.selection()
                             onSelect(preset)
                         } label: {
@@ -106,6 +110,7 @@ struct ZoomControl: View {
                 onContinuousZoom(clamped)
             }
             .onEnded { _ in
+                lastDragEnd = Date()
                 dragStartDisplay = nil
                 hideTask = Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 1_400_000_000)
@@ -135,6 +140,31 @@ struct ZoomDial: View {
     let pointsPerDoubling: CGFloat
 
     var body: some View {
+        VStack(spacing: 4) {
+            // 현재 배율 (마스크 밖에 두어 잘리지 않게)
+            Text(ZoomPreset.format(value) + "×")
+                .font(.system(size: 14, weight: .bold, design: .rounded).monospacedDigit())
+                .foregroundStyle(Theme.accent)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(Color.black.opacity(0.65)))
+                .fixedSize()
+
+            ruler
+                .mask(
+                    LinearGradient(
+                        stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.16),
+                                .init(color: .black, location: 0.84), .init(color: .clear, location: 1)],
+                        startPoint: .leading, endPoint: .trailing
+                    )
+                )
+                .background(Capsule().fill(Color.black.opacity(0.35)))
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private var ruler: some View {
         Canvas { context, size in
             let center = size.width / 2
             let baseline = size.height - 6
@@ -148,8 +178,7 @@ struct ZoomDial: View {
             var stop = log2(minValue)
             let end = log2(maxValue)
             while stop <= end + 0.0001 {
-                let v = pow(2, stop)
-                let px = x(v)
+                let px = x(pow(2, stop))
                 if px > -4 && px < size.width + 4 {
                     var tick = Path()
                     tick.move(to: CGPoint(x: px, y: baseline))
@@ -175,30 +204,11 @@ struct ZoomDial: View {
                 )
             }
 
-            // 가운데 기준선 + 현재 배율
+            // 가운데 기준선
             var marker = Path()
             marker.move(to: CGPoint(x: center, y: baseline + 2))
             marker.addLine(to: CGPoint(x: center, y: baseline - 22))
             context.stroke(marker, with: .color(Theme.accent), lineWidth: 2)
         }
-        .overlay(alignment: .top) {
-            Text(ZoomPreset.format(value) + "×")
-                .font(.system(size: 13, weight: .bold, design: .rounded).monospacedDigit())
-                .foregroundStyle(Theme.accent)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 2)
-                .background(Capsule().fill(Color.black.opacity(0.6)))
-                .offset(y: -14)
-        }
-        .mask(
-            LinearGradient(
-                stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.18),
-                        .init(color: .black, location: 0.82), .init(color: .clear, location: 1)],
-                startPoint: .leading, endPoint: .trailing
-            )
-        )
-        .background(Capsule().fill(Color.black.opacity(0.35)))
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
     }
 }

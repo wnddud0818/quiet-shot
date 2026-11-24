@@ -59,6 +59,10 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var burstCount = 0
     @Published private(set) var shutterSuppressionSupported = false
     @Published var toast: String?
+    /// 셀프 타이머 남은 초 (본 화면과 iPhone Duo 바깥 화면이 함께 표시)
+    @Published var countdown: Int?
+    /// 미리보기 회전각 (바깥 화면 미리보기도 같은 각도로)
+    @Published private(set) var previewRotationAngle: CGFloat = 90
 
     /// 광각 기준 표시 배율 (예: 0.5×, 1×, 2.3×, 5×)
     var displayZoom: CGFloat { zoom.display(for: zoomFactor) }
@@ -101,6 +105,7 @@ final class CameraController: NSObject, ObservableObject {
     /// iPhone Duo: 지금 앱이 떠 있는 화면 쪽(사용자 쪽)을 향한 카메라들 (DirectionCoordinator 제공)
     private var forwardFacingCameraIDs: [String] = []
     private var controlsDelegateInstalled = false
+    private var interfaceIsLandscapeOnQueue = false
     /// videoQueue 전용: 마지막으로 받은 프레임 크기
     private var lastFrameSize = CGSize.zero
 
@@ -226,6 +231,7 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func applyPreviewRotation(_ angle: CGFloat) {
+        previewRotationAngle = angle
         guard let connection = previewLayer?.connection,
               connection.isVideoRotationAngleSupported(angle) else { return }
         connection.videoRotationAngle = angle
@@ -243,6 +249,9 @@ final class CameraController: NSObject, ObservableObject {
         }
         if !session.isRunning {
             session.startRunning()
+            if let device = videoInput?.device {
+                applyDynamicAspectRatio(to: device)
+            }
         }
         publish { $0.status = .running }
         PhotoLibrarySaver.requestAuthorizationIfNeeded()
@@ -317,9 +326,6 @@ final class CameraController: NSObject, ObservableObject {
                 device.automaticallyEnablesLowLightBoostWhenAvailable = true
             }
             device.isSubjectAreaChangeMonitoringEnabled = false
-            if selectedEngine == .videoFrame {
-                CameraController.preferSquareDynamicAspectRatio(device)
-            }
             device.unlockForConfiguration()
         } catch {
             // 잠금 실패 시 세션 기본 포맷으로 동작
@@ -389,6 +395,7 @@ final class CameraController: NSObject, ObservableObject {
             device.unlockForConfiguration()
         }
         observe(device)
+        applyDynamicAspectRatio(to: device)
         videoQueue.async { self.lastFrameSize = .zero }
 
         let torchAvailable = device.hasTorch && device.isTorchAvailable
@@ -500,12 +507,33 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
-    /// 정사각형 센서(Center Stage 전면 카메라)는 1:1로 받아 촬영 방향에 맞게 직접 자름 (최대 화소)
-    private static func preferSquareDynamicAspectRatio(_ device: AVCaptureDevice) {
+    /// 정사각형 센서(iPhone 17·Duo 전면 Center Stage 카메라): 화면 방향과 같은 비율로 출력
+    /// (세로 화면 3:4, 가로 화면 4:3). Apple 예제처럼 구성이 끝난 뒤 별도의 잠금 블록에서 설정합니다.
+    private func applyDynamicAspectRatio(to device: AVCaptureDevice) {
         guard #available(iOS 26.0, *) else { return }
         let supported = device.activeFormat.supportedDynamicAspectRatios
-        guard supported.contains(.ratio1x1), device.dynamicAspectRatio != .ratio1x1 else { return }
-        device.setDynamicAspectRatio(.ratio1x1, completionHandler: nil)
+        guard !supported.isEmpty else { return }
+        let landscape = interfaceIsLandscapeOnQueue
+        if landscape, supported.contains(.ratio4x3), device.dynamicAspectRatio != .ratio4x3 {
+            guard (try? device.lockForConfiguration()) != nil else { return }
+            device.setDynamicAspectRatio(.ratio4x3, completionHandler: nil)
+            device.unlockForConfiguration()
+        } else if !landscape, supported.contains(.ratio3x4), device.dynamicAspectRatio != .ratio3x4 {
+            guard (try? device.lockForConfiguration()) != nil else { return }
+            device.setDynamicAspectRatio(.ratio3x4, completionHandler: nil)
+            device.unlockForConfiguration()
+        }
+    }
+
+    /// 앱 화면이 가로인지 (iPhone Duo 안쪽 화면 등). 정사각형 센서의 출력 비율에 반영 (메인 스레드)
+    func setInterfaceLandscape(_ landscape: Bool) {
+        sessionQueue.async { [weak self] in
+            guard let self, self.interfaceIsLandscapeOnQueue != landscape else { return }
+            self.interfaceIsLandscapeOnQueue = landscape
+            if let device = self.videoInput?.device {
+                self.applyDynamicAspectRatio(to: device)
+            }
+        }
     }
 
     /// 줌 배율·노출 보정 변화를 UI에 반영 (버튼, 다이얼, 핀치, 카메라 제어 버튼 등 모든 경로)

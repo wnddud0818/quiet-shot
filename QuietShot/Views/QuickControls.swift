@@ -9,6 +9,10 @@ struct QuickControls: View {
     @Binding var saveFormat: SaveFormat
     let megapixelText: (AspectRatioOption) -> String
     let iconAngle: Angle
+    /// iPhone Duo 바깥 화면 미리보기 (사용할 수 없으면 nil → 버튼 숨김)
+    var outerPreview: Binding<Bool>? = nil
+    /// 세로로 세우기 (안쪽 화면 옆 패널용)
+    var vertical = false
     let onOpenSettings: () -> Void
 
     private enum Expanded { case ratio, timer }
@@ -32,9 +36,9 @@ struct QuickControls: View {
                 mainRow
             }
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 5)
-        .background(Capsule().fill(Theme.glass))
+        .padding(.horizontal, vertical ? 5 : 6)
+        .padding(.vertical, vertical ? 8 : 5)
+        .background(RoundedRectangle(cornerRadius: 26, style: .continuous).fill(Theme.glass))
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: expanded)
     }
 
@@ -55,7 +59,7 @@ struct QuickControls: View {
     }
 
     private var mainRow: some View {
-        HStack(spacing: 4) {
+        stack {
             item(icon: "aspectratio", caption: aspectRatio.title, active: aspectRatio != .fourThree) {
                 expanded = .ratio
             }
@@ -67,6 +71,11 @@ struct QuickControls: View {
             }
             item(icon: "photo", caption: saveFormat == .heic ? "HEIC" : "JPEG", active: false) {
                 saveFormat = saveFormat == .heic ? .jpeg : .heic
+            }
+            if let outerPreview {
+                item(icon: "rectangle.on.rectangle", caption: "바깥 화면", active: outerPreview.wrappedValue) {
+                    outerPreview.wrappedValue.toggle()
+                }
             }
             item(icon: "gearshape", caption: "설정", active: false, action: onOpenSettings)
         }
@@ -92,12 +101,22 @@ struct QuickControls: View {
         .buttonStyle(PressableStyle())
     }
 
+    /// 가로/세로 배치 전환
+    @ViewBuilder
+    private func stack<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        if vertical {
+            VStack(spacing: 4, content: content)
+        } else {
+            HStack(spacing: 4, content: content)
+        }
+    }
+
     private func optionRow(_ options: [Option]) -> some View {
-        HStack(spacing: 6) {
+        stack {
             Button {
                 expanded = nil
             } label: {
-                Image(systemName: "chevron.left")
+                Image(systemName: vertical ? "chevron.up" : "chevron.left")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(.white)
                     .frame(width: 30, height: 44)
