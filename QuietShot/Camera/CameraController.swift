@@ -58,16 +58,21 @@ final class CameraController: NSObject, ObservableObject {
     /// 광각 기준 표시 배율 (예: 0.5×, 1×, 2.3×, 5×)
     var displayZoom: CGFloat { lensMultiplier * zoomFactor }
 
-    var megapixelText: String {
-        let width = Double(outputDimensions.width)
-        let height = Double(outputDimensions.height)
-        guard width > 0, height > 0 else { return "—" }
-        return "\(Int((width * height / 1_000_000).rounded(.down)))MP"
+    /// 선택한 촬영 비율로 크롭한 뒤 실제 저장되는 크기
+    func savedDimensions(for aspect: AspectRatioOption) -> (width: Int, height: Int) {
+        aspect.croppedSize(width: Int(outputDimensions.width), height: Int(outputDimensions.height))
     }
 
-    var resolutionText: String {
-        guard outputDimensions.width > 0 else { return "—" }
-        return "\(megapixelText) · \(outputDimensions.width)×\(outputDimensions.height)"
+    func megapixelText(for aspect: AspectRatioOption) -> String {
+        let size = savedDimensions(for: aspect)
+        guard size.width > 0, size.height > 0 else { return "—" }
+        return "\(Int((Double(size.width) * Double(size.height) / 1_000_000).rounded(.down)))MP"
+    }
+
+    func resolutionText(for aspect: AspectRatioOption) -> String {
+        let size = savedDimensions(for: aspect)
+        guard size.width > 0 else { return "—" }
+        return "\(megapixelText(for: aspect)) · \(size.width)×\(size.height)"
     }
 
     // MARK: - 세션 (sessionQueue 전용)
@@ -104,6 +109,7 @@ final class CameraController: NSObject, ObservableObject {
         let position: AVCaptureDevice.Position
         let location: CLLocation?
         let heading: CLHeading?
+        let aspect: AspectRatioOption
     }
 
     private let frameLock = NSLock()
@@ -557,14 +563,16 @@ final class CameraController: NSObject, ObservableObject {
             switch self.activeEngine {
             case .photoPipeline:
                 self.capturePhotoSilently(angle: angle, mirrored: mirrored, format: options.saveFormat,
-                                          fast: isBurst, place: place, position: device.position)
+                                          fast: isBurst, place: place, position: device.position,
+                                          aspect: options.aspectRatio)
             case .videoFrame:
                 let wideColor = device.activeColorSpace == .P3_D65
                 let colorSpaceName = wideColor ? CGColorSpace.displayP3 : CGColorSpace.sRGB
                 let colorSpace = CGColorSpace(name: colorSpaceName) ?? CGColorSpaceCreateDeviceRGB()
                 let request = FrameRequest(rotationAngle: angle, mirrored: mirrored, format: options.saveFormat,
                                            colorSpace: colorSpace, wideColor: wideColor, position: device.position,
-                                           location: place.location, heading: place.heading)
+                                           location: place.location, heading: place.heading,
+                                           aspect: options.aspectRatio)
                 self.frameLock.lock()
                 self.pendingFrameRequests.append(request)
                 self.frameLock.unlock()
@@ -578,7 +586,8 @@ final class CameraController: NSObject, ObservableObject {
                                       format: SaveFormat,
                                       fast: Bool,
                                       place: LocationProvider.Snapshot,
-                                      position: AVCaptureDevice.Position) {
+                                      position: AVCaptureDevice.Position,
+                                      aspect: AspectRatioOption) {
         guard #available(iOS 18.0, *), photoOutput.isShutterSoundSuppressionSupported else {
             // 안전장치: 억제가 불가능해졌다면 프레임 엔진으로 전환하고 이번 촬영은 취소
             releaseSlot()
@@ -614,7 +623,7 @@ final class CameraController: NSObject, ObservableObject {
         }
         let processor = PhotoCaptureProcessor(uniqueID: uniqueID, gps: gps) { [weak self] data, error in
             self?.handleCapturedPhoto(uniqueID: uniqueID, data: data, error: error, format: savedFormat,
-                                      location: location, date: captureDate)
+                                      aspect: aspect, location: location, date: captureDate)
         }
         processorLock.lock()
         photoProcessors[uniqueID] = processor
@@ -627,6 +636,7 @@ final class CameraController: NSObject, ObservableObject {
                                      data: Data?,
                                      error: Error?,
                                      format: SaveFormat,
+                                     aspect: AspectRatioOption,
                                      location: CLLocation?,
                                      date: Date) {
         processorLock.lock()
@@ -639,8 +649,15 @@ final class CameraController: NSObject, ObservableObject {
             return
         }
         processingQueue.async { [weak self] in
-            let thumbnail = ImageEncoder.thumbnail(from: data)
-            self?.saveToLibrary(data, format: format, thumbnail: thumbnail, location: location, date: date)
+            // 4:3 이외의 비율은 중앙 크롭 후 메타데이터를 유지한 채 다시 인코딩 (4:3은 Apple 원본 그대로)
+            var output = data
+            var outputFormat = format
+            if let cropped = ImageEncoder.cropped(data, to: aspect, preferred: format) {
+                output = cropped.data
+                outputFormat = cropped.format
+            }
+            let thumbnail = ImageEncoder.thumbnail(from: output)
+            self?.saveToLibrary(output, format: outputFormat, thumbnail: thumbnail, location: location, date: date)
         }
     }
 
@@ -747,6 +764,8 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
         if request.mirrored {
             image = image.oriented(.upMirrored)
         }
+        // 촬영 비율로 중앙 크롭 (미리보기와 동일한 영역)
+        image = image.cropped(to: request.aspect.centeredCropRect(in: image.extent))
 
         // 버퍼를 오래 붙잡지 않도록 여기서 바로 렌더링 후 해제
         guard let cgImage = ciContext.createCGImage(image, from: image.extent, format: .RGBA8, colorSpace: request.colorSpace) else {

@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import UniformTypeIdentifiers
 
@@ -9,6 +10,64 @@ enum SettingsKey {
     static let hapticOnCapture = "hapticOnCapture"
     static let forceFrameEngine = "forceFrameEngine"
     static let saveLocation = "saveLocation"
+    static let aspectRatio = "aspectRatio"
+}
+
+/// 촬영 비율. iPhone 기본 카메라처럼 센서 전체(4:3) 이미지의 중앙을 잘라 만듭니다.
+enum AspectRatioOption: String, CaseIterable, Identifiable {
+    case fourThree = "4:3"
+    case threeTwo = "3:2"
+    case sixteenNine = "16:9"
+    case square = "1:1"
+
+    var id: String { rawValue }
+    var title: String { rawValue }
+
+    /// 긴 변 ÷ 짧은 변
+    var longToShort: Double {
+        switch self {
+        case .fourThree: return 4.0 / 3.0
+        case .threeTwo: return 3.0 / 2.0
+        case .sixteenNine: return 16.0 / 9.0
+        case .square: return 1
+        }
+    }
+
+    /// 세로 화면 미리보기의 가로 ÷ 세로
+    var portraitAspect: CGFloat { CGFloat(1 / longToShort) }
+
+    /// width×height 이미지를 이 비율로 중앙 크롭했을 때의 크기 (짝수 픽셀)
+    func croppedSize(width: Int, height: Int) -> (width: Int, height: Int) {
+        guard width > 0, height > 0 else { return (width, height) }
+        let longSide = max(width, height)
+        let shortSide = min(width, height)
+        let current = Double(longSide) / Double(shortSide)
+        var newLong = longSide
+        var newShort = shortSide
+        if current > longToShort + 0.001 {
+            newLong = Int((Double(shortSide) * longToShort).rounded())       // 긴 변을 자름 (예: 1:1)
+        } else if current < longToShort - 0.001 {
+            newShort = Int((Double(longSide) / longToShort).rounded())       // 짧은 변을 자름 (예: 16:9)
+        } else {
+            return (width, height)
+        }
+        newLong -= newLong % 2
+        newShort -= newShort % 2
+        return width >= height ? (newLong, newShort) : (newShort, newLong)
+    }
+
+    /// rect 안에서 이 비율로 중앙 크롭한 영역
+    func centeredCropRect(in rect: CGRect) -> CGRect {
+        let size = croppedSize(width: Int(rect.width.rounded()), height: Int(rect.height.rounded()))
+        let width = CGFloat(size.width)
+        let height = CGFloat(size.height)
+        return CGRect(
+            x: rect.minX + ((rect.width - width) / 2).rounded(.down),
+            y: rect.minY + ((rect.height - height) / 2).rounded(.down),
+            width: width,
+            height: height
+        )
+    }
 }
 
 enum SaveFormat: String, CaseIterable, Identifiable {
@@ -38,6 +97,7 @@ struct CaptureOptions {
     let mirrorFrontCamera: Bool
     /// 기본값 true (설정에서 끌 수 있음)
     let saveLocation: Bool
+    let aspectRatio: AspectRatioOption
 
     static func current() -> CaptureOptions {
         let defaults = UserDefaults.standard
@@ -45,7 +105,8 @@ struct CaptureOptions {
         return CaptureOptions(
             saveFormat: format,
             mirrorFrontCamera: defaults.bool(forKey: SettingsKey.mirrorFrontCamera),
-            saveLocation: defaults.object(forKey: SettingsKey.saveLocation) as? Bool ?? true
+            saveLocation: defaults.object(forKey: SettingsKey.saveLocation) as? Bool ?? true,
+            aspectRatio: AspectRatioOption(rawValue: defaults.string(forKey: SettingsKey.aspectRatio) ?? "") ?? .fourThree
         )
     }
 }

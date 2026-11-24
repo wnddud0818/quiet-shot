@@ -10,6 +10,7 @@ struct CameraScreen: View {
     @AppStorage(SettingsKey.showGrid) private var showGrid = false
     @AppStorage(SettingsKey.hapticOnCapture) private var hapticOnCapture = false
     @AppStorage(SettingsKey.saveLocation) private var saveLocation = true
+    @AppStorage(SettingsKey.aspectRatio) private var aspectRatio: AspectRatioOption = .fourThree
 
     @State private var showSettings = false
     @State private var focusPoint: CGPoint?
@@ -75,7 +76,8 @@ struct CameraScreen: View {
                 .padding(.horizontal, 16)
                 .frame(height: 52)
             preview
-            Spacer(minLength: 8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.vertical, 4)
             zoomBar
                 .frame(height: 48)
             bottomBar
@@ -101,6 +103,8 @@ struct CameraScreen: View {
                 Color.clear.frame(width: 40, height: 40)
             }
 
+            aspectRatioMenu
+
             Spacer()
 
             Button {
@@ -108,7 +112,7 @@ struct CameraScreen: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "speaker.slash.fill")
-                    Text(camera.megapixelText)
+                    Text(camera.megapixelText(for: aspectRatio))
                         .monospacedDigit()
                 }
                 .font(.footnote.weight(.semibold))
@@ -118,15 +122,38 @@ struct CameraScreen: View {
                 .background(Capsule().fill(Color.white.opacity(0.15)))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("무음 촬영, \(camera.resolutionText)")
+            .accessibilityLabel("무음 촬영, \(camera.resolutionText(for: aspectRatio))")
 
             Spacer()
+
+            Color.clear.frame(width: 52, height: 1)   // 왼쪽 비율 버튼과 균형
 
             CircleIconButton(systemName: "gearshape.fill") {
                 showSettings = true
             }
             .rotationEffect(iconAngle)
         }
+    }
+
+    /// 촬영 비율 선택 메뉴 (4:3 / 3:2 / 16:9 / 1:1)
+    private var aspectRatioMenu: some View {
+        Menu {
+            Picker("촬영 비율", selection: $aspectRatio) {
+                ForEach(AspectRatioOption.allCases) { option in
+                    Text("\(option.title)  ·  \(camera.megapixelText(for: option))").tag(option)
+                }
+            }
+        } label: {
+            Text(aspectRatio.title)
+                .font(.footnote.weight(.bold))
+                .monospacedDigit()
+                .foregroundStyle(.white)
+                .frame(minWidth: 44, minHeight: 32)
+                .padding(.horizontal, 4)
+                .background(Capsule().stroke(Color.white.opacity(0.8), lineWidth: 1.2))
+        }
+        .rotationEffect(iconAngle)
+        .accessibilityLabel("촬영 비율 \(aspectRatio.title)")
     }
 
     private var preview: some View {
@@ -151,7 +178,8 @@ struct CameraScreen: View {
                 }
             }
         )
-        .aspectRatio(3.0 / 4.0, contentMode: .fit)
+        .aspectRatio(aspectRatio.portraitAspect, contentMode: .fit)
+        .animation(.easeInOut(duration: 0.2), value: aspectRatio)
         .overlay {
             if showGrid {
                 GridOverlay().allowsHitTesting(false)

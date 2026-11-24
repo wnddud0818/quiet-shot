@@ -22,7 +22,8 @@ struct CameraPreview: UIViewRepresentable {
         let view = PreviewView()
         view.backgroundColor = .black
         view.previewLayer.session = session
-        view.previewLayer.videoGravity = .resizeAspect
+        // 선택한 비율의 프레임을 꽉 채움 = 저장되는 중앙 크롭 영역과 동일
+        view.previewLayer.videoGravity = .resizeAspectFill
 
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
         let pinch = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))

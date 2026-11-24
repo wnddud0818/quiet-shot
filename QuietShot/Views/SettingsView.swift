@@ -11,12 +11,13 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.hapticOnCapture) private var hapticOnCapture = false
     @AppStorage(SettingsKey.forceFrameEngine) private var forceFrameEngine = false
     @AppStorage(SettingsKey.saveLocation) private var saveLocation = true
+    @AppStorage(SettingsKey.aspectRatio) private var aspectRatio: AspectRatioOption = .fourThree
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    LabeledContent("저장 해상도", value: camera.resolutionText)
+                    LabeledContent("저장 해상도", value: camera.resolutionText(for: aspectRatio))
                     LabeledContent("캡처 방식", value: camera.engine.title)
                     LabeledContent("셔터음", value: "없음 (무음)")
                     Text(engineExplanation)
@@ -27,6 +28,11 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Picker("촬영 비율", selection: $aspectRatio) {
+                        ForEach(AspectRatioOption.allCases) { option in
+                            Text("\(option.title) (\(camera.megapixelText(for: option)))").tag(option)
+                        }
+                    }
                     Picker("파일 형식", selection: $saveFormat) {
                         ForEach(SaveFormat.allCases) { format in
                             Text(format.title).tag(format)

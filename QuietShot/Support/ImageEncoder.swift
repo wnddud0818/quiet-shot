@@ -46,6 +46,31 @@ enum ImageEncoder {
         return output as Data
     }
 
+    /// 사진 파이프라인 결과를 촬영 비율로 중앙 크롭해 다시 인코딩. 크롭이 필요 없으면 nil.
+    /// EXIF/TIFF/GPS/MakerApple 등 원본 메타데이터는 유지하고 픽셀 크기만 갱신합니다.
+    static func cropped(_ data: Data, to aspect: AspectRatioOption, preferred: SaveFormat) -> Encoded? {
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            return nil
+        }
+        let fullRect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        let cropRect = aspect.centeredCropRect(in: fullRect)
+        guard cropRect.size != fullRect.size, let croppedImage = image.cropping(to: cropRect) else {
+            return nil
+        }
+
+        var metadata = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] ?? [:]
+        metadata.removeValue(forKey: kCGImagePropertyPixelWidth as String)
+        metadata.removeValue(forKey: kCGImagePropertyPixelHeight as String)
+        var exif = metadata[kCGImagePropertyExifDictionary as String] as? [String: Any] ?? [:]
+        exif[kCGImagePropertyExifPixelXDimension as String] = croppedImage.width
+        exif[kCGImagePropertyExifPixelYDimension as String] = croppedImage.height
+        metadata[kCGImagePropertyExifDictionary as String] = exif
+
+        return encode(croppedImage, preferred: preferred, metadata: metadata)
+    }
+
     // MARK: - 썸네일
 
     static func thumbnail(from image: CGImage, maxPixel: CGFloat = 240) -> UIImage? {
