@@ -90,7 +90,7 @@ Swift + SwiftUI + AVFoundation으로 만든 **네이티브 iOS 무음 카메라 
   (모든 빌드: [Releases](https://github.com/wnddud0818/quiet-shot/releases))
 - 서명되지 않은 IPA라 그대로는 설치되지 않습니다. PC/Mac에서 **Sideloadly** 또는 **AltStore**에 IPA를 넣고 본인 Apple ID로 서명해 설치하세요
   (무료 Apple ID는 7일마다 재설치, 유료 개발자 계정은 1년). iPhone에서 *설정 > 개인정보 보호 및 보안 > 개발자 모드*를 켜야 합니다.
-- `main`에 푸시할 때마다 GitHub Actions가 새 IPA를 만들어 Releases에 올립니다.
+- IPA는 Mac에서 직접 빌드한 뒤 GitHub Releases에 업로드합니다. 기존 릴리즈와 Actions 실행 기록은 유지합니다.
 
 ## 빌드 & 설치
 
@@ -102,7 +102,17 @@ Swift + SwiftUI + AVFoundation으로 만든 **네이티브 iOS 무음 카메라 
 3. iPhone을 연결하고 실행 (▶). 카메라는 **실기기에서만** 동작합니다(시뮬레이터 불가).
 4. 처음 실행 시 iPhone에서 *설정 > 개인정보 보호 및 보안 > 개발자 모드*가 필요할 수 있습니다.
 
-CI(GitHub Actions, `.github/workflows/ios-build.yml`)가 푸시할 때마다 **Xcode 26(iOS 26 SDK)과 Xcode 27(iOS 27 SDK)** 두 환경에서 서명 없이 빌드를 검증합니다.
+GitHub Actions(`.github/workflows/ios-build.yml`)는 수동 실행용으로 보존하며, 푸시와 PR에서는 자동 실행하지 않습니다.
+
+### 로컬에서 IPA 빌드 및 릴리즈
+
+Xcode와 인증된 GitHub CLI(`gh`)가 있는 Mac에서, main의 변경을 커밋하고 푸시한 뒤 실행합니다.
+
+```bash
+bash scripts/release.sh v1.0.1
+```
+
+서명 없는 IPA를 로컬에서 빌드하고 해당 main 커밋으로 릴리즈를 생성합니다. 결과 파일은 `build/QuietShot-unsigned.ipa`입니다.
 
 ## 구조
 
