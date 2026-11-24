@@ -1,0 +1,30 @@
+name: SDK API probe (temporary)
+on:
+  push:
+    branches: [claude/sharp-babbage-fbtvjl]
+jobs:
+  probe:
+    runs-on: xcode-27
+    steps:
+      - name: Grep iOS SDK for camera / iPhone Duo APIs
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE"; xcodebuild -version
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path); echo "SDK=$SDK"
+          F="$SDK/System/Library/Frameworks"
+          PAT='OuterUltraWide|InnerUltraWide|DirectionCoordinator|DeviceDescriptor|displayVideoZoomFactorMultiplier|SystemZoomSlider|SystemExposureBiasSlider|CaptureEventInteraction|dynamicAspectRatio|DynamicAspectRatio|SmartFraming|SensorOrientationCompensation|VirtualFront|centerStageControlMode|CenterStageEnabled|supportsControls|setControlsDelegate|SessionControlsDelegate'
+          echo "===== ObjC headers ====="
+          grep -rn -E "$PAT" "$F/AVFoundation.framework/Headers" "$F/AVKit.framework/Headers" | cut -c1-260 | head -150
+          echo "===== DeviceType declarations ====="
+          grep -n -B1 -A3 -E "AVCaptureDeviceType(BuiltIn)?(Outer|Inner)" "$F/AVFoundation.framework/Headers/AVCaptureDevice.h" | cut -c1-220 | head -60
+          echo "===== Swift interfaces ====="
+          for fw in AVFoundation AVKit; do
+            for f in $(find "$F/$fw.framework" -name "arm64e-apple-ios.swiftinterface" -o -name "arm64-apple-ios.swiftinterface" | head -2); do
+              echo "--- $f"; grep -n -E "$PAT" "$f" | cut -c1-260 | head -60
+            done
+          done
+          echo "===== DirectionCoordinator header (full) ====="
+          H=$(grep -rl "DirectionCoordinator" "$F/AVKit.framework/Headers" "$F/AVFoundation.framework/Headers" 2>/dev/null | head -1)
+          [ -n "$H" ] && sed -n '1,200p' "$H" | grep -v "^\s*$" | cut -c1-220 | head -120
+          echo "===== UIKit fold/posture/reserved region ====="
+          grep -rn -E "ReservedRegion|FoldState|foldState|Posture|Hinge|SceneAccessor" "$F/UIKit.framework/Headers" | cut -c1-220 | head -60
