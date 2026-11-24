@@ -1,3 +1,4 @@
+import CoreLocation
 import Foundation
 import Photos
 
@@ -18,13 +19,24 @@ enum PhotoLibrarySaver {
         }
     }
 
-    static func save(_ data: Data, format: SaveFormat, completion: @escaping (Error?) -> Void) {
+    /// - Parameters:
+    ///   - location: 사진 앱의 지도/장소 정보에도 반영 (파일 EXIF GPS와 별개로 에셋에 기록)
+    ///   - creationDate: 사진 앱의 촬영 일시
+    static func save(_ data: Data,
+                     format: SaveFormat,
+                     location: CLLocation?,
+                     creationDate: Date,
+                     completion: @escaping (Error?) -> Void) {
         let perform = {
             PHPhotoLibrary.shared().performChanges({
                 let request = PHAssetCreationRequest.forAsset()
                 let options = PHAssetResourceCreationOptions()
                 options.uniformTypeIdentifier = format.utType.identifier
                 request.addResource(with: .photo, data: data, options: options)
+                request.creationDate = creationDate
+                if let location {
+                    request.location = location
+                }
             }, completionHandler: { _, error in
                 completion(error)
             })

@@ -9,6 +9,7 @@ struct CameraScreen: View {
 
     @AppStorage(SettingsKey.showGrid) private var showGrid = false
     @AppStorage(SettingsKey.hapticOnCapture) private var hapticOnCapture = false
+    @AppStorage(SettingsKey.saveLocation) private var saveLocation = true
 
     @State private var showSettings = false
     @State private var focusPoint: CGPoint?
@@ -25,6 +26,7 @@ struct CameraScreen: View {
         .onAppear {
             camera.start()
             orientation.start()
+            updateLocationUpdates()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
@@ -32,6 +34,13 @@ struct CameraScreen: View {
             } else {
                 camera.stopBurst()
             }
+            updateLocationUpdates()
+        }
+        .onChange(of: camera.status) { _, _ in
+            updateLocationUpdates()
+        }
+        .onChange(of: saveLocation) { _, _ in
+            updateLocationUpdates()
         }
         .sheet(isPresented: $showSettings) {
             SettingsView(camera: camera)
@@ -290,6 +299,11 @@ struct CameraScreen: View {
                     camera.toast = nil
                 }
         }
+    }
+
+    /// GPS는 카메라가 화면에 떠 있고 위치 기록이 켜져 있을 때만 갱신 (카메라 권한 요청 뒤에 위치 권한 요청)
+    private func updateLocationUpdates() {
+        LocationProvider.shared.setEnabled(saveLocation && camera.status == .running && scenePhase == .active)
     }
 
     private func feedback() {

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct SettingsView: View {
     @ObservedObject var camera: CameraController
@@ -9,6 +10,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.showGrid) private var showGrid = false
     @AppStorage(SettingsKey.hapticOnCapture) private var hapticOnCapture = false
     @AppStorage(SettingsKey.forceFrameEngine) private var forceFrameEngine = false
+    @AppStorage(SettingsKey.saveLocation) private var saveLocation = true
 
     var body: some View {
         NavigationStack {
@@ -33,6 +35,22 @@ struct SettingsView: View {
                     Toggle("전면 카메라 좌우 반전 저장", isOn: $mirrorFrontCamera)
                 } header: {
                     Text("저장")
+                }
+
+                Section {
+                    Toggle("촬영 위치(GPS) 기록", isOn: $saveLocation)
+                    if saveLocation && LocationProvider.shared.isAuthorizationDenied {
+                        Button("위치 권한이 꺼져 있습니다 — 설정 열기") {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                        }
+                        .font(.footnote)
+                    }
+                } header: {
+                    Text("EXIF 메타데이터")
+                } footer: {
+                    Text("기종·렌즈, 초점거리(35mm 환산 포함), 조리개, 셔터속도, ISO, 노출 보정, 측광·화이트밸런스, 디지털 줌, 촬영 일시(시간대·1/1000초 포함), 해상도, 색 공간과 Apple 제조사 정보(MakerApple)를 기록합니다. 위치 기록을 켜면 GPS 위도·경도·고도·촬영 방향도 기록됩니다.")
                 }
 
                 Section {

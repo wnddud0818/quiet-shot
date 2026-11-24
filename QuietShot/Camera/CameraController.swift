@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreImage
+import CoreLocation
 import UIKit
 
 /// 무음 카메라의 핵심: 세션 구성, 최대 해상도 포맷 선택, 무음 캡처.
@@ -99,6 +100,10 @@ final class CameraController: NSObject, ObservableObject {
         let mirrored: Bool
         let format: SaveFormat
         let colorSpace: CGColorSpace
+        let wideColor: Bool
+        let position: AVCaptureDevice.Position
+        let location: CLLocation?
+        let heading: CLHeading?
     }
 
     private let frameLock = NSLock()
@@ -537,6 +542,7 @@ final class CameraController: NSObject, ObservableObject {
 
         let angle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? 90
         let options = CaptureOptions.current()
+        let place = options.saveLocation ? LocationProvider.shared.snapshot() : .empty
         if isBurst { burstCount += 1 }
         captureTick += 1
 
@@ -550,11 +556,15 @@ final class CameraController: NSObject, ObservableObject {
 
             switch self.activeEngine {
             case .photoPipeline:
-                self.capturePhotoSilently(angle: angle, mirrored: mirrored, format: options.saveFormat, fast: isBurst)
+                self.capturePhotoSilently(angle: angle, mirrored: mirrored, format: options.saveFormat,
+                                          fast: isBurst, place: place, position: device.position)
             case .videoFrame:
-                let colorSpaceName = device.activeColorSpace == .P3_D65 ? CGColorSpace.displayP3 : CGColorSpace.sRGB
+                let wideColor = device.activeColorSpace == .P3_D65
+                let colorSpaceName = wideColor ? CGColorSpace.displayP3 : CGColorSpace.sRGB
                 let colorSpace = CGColorSpace(name: colorSpaceName) ?? CGColorSpaceCreateDeviceRGB()
-                let request = FrameRequest(rotationAngle: angle, mirrored: mirrored, format: options.saveFormat, colorSpace: colorSpace)
+                let request = FrameRequest(rotationAngle: angle, mirrored: mirrored, format: options.saveFormat,
+                                           colorSpace: colorSpace, wideColor: wideColor, position: device.position,
+                                           location: place.location, heading: place.heading)
                 self.frameLock.lock()
                 self.pendingFrameRequests.append(request)
                 self.frameLock.unlock()
@@ -563,7 +573,12 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     /// 사진 파이프라인 촬영 (sessionQueue). 셔터음 억제가 불가능하면 절대 촬영하지 않음.
-    private func capturePhotoSilently(angle: CGFloat, mirrored: Bool, format: SaveFormat, fast: Bool) {
+    private func capturePhotoSilently(angle: CGFloat,
+                                      mirrored: Bool,
+                                      format: SaveFormat,
+                                      fast: Bool,
+                                      place: LocationProvider.Snapshot,
+                                      position: AVCaptureDevice.Position) {
         guard #available(iOS 18.0, *), photoOutput.isShutterSoundSuppressionSupported else {
             // 안전장치: 억제가 불가능해졌다면 프레임 엔진으로 전환하고 이번 촬영은 취소
             releaseSlot()
@@ -592,8 +607,14 @@ final class CameraController: NSObject, ObservableObject {
         }
 
         let uniqueID = settings.uniqueID
-        let processor = PhotoCaptureProcessor(uniqueID: uniqueID) { [weak self] data, error in
-            self?.handleCapturedPhoto(uniqueID: uniqueID, data: data, error: error, format: savedFormat)
+        let captureDate = Date()
+        let location = place.location
+        let gps = location.map {
+            MetadataBuilder.gpsDictionary(location: $0, heading: place.heading, position: position)
+        }
+        let processor = PhotoCaptureProcessor(uniqueID: uniqueID, gps: gps) { [weak self] data, error in
+            self?.handleCapturedPhoto(uniqueID: uniqueID, data: data, error: error, format: savedFormat,
+                                      location: location, date: captureDate)
         }
         processorLock.lock()
         photoProcessors[uniqueID] = processor
@@ -602,7 +623,12 @@ final class CameraController: NSObject, ObservableObject {
         photoOutput.capturePhoto(with: settings, delegate: processor)
     }
 
-    private func handleCapturedPhoto(uniqueID: Int64, data: Data?, error: Error?, format: SaveFormat) {
+    private func handleCapturedPhoto(uniqueID: Int64,
+                                     data: Data?,
+                                     error: Error?,
+                                     format: SaveFormat,
+                                     location: CLLocation?,
+                                     date: Date) {
         processorLock.lock()
         photoProcessors[uniqueID] = nil
         processorLock.unlock()
@@ -614,12 +640,16 @@ final class CameraController: NSObject, ObservableObject {
         }
         processingQueue.async { [weak self] in
             let thumbnail = ImageEncoder.thumbnail(from: data)
-            self?.saveToLibrary(data, format: format, thumbnail: thumbnail)
+            self?.saveToLibrary(data, format: format, thumbnail: thumbnail, location: location, date: date)
         }
     }
 
-    private func saveToLibrary(_ data: Data, format: SaveFormat, thumbnail: UIImage?) {
-        PhotoLibrarySaver.save(data, format: format) { [weak self] error in
+    private func saveToLibrary(_ data: Data,
+                               format: SaveFormat,
+                               thumbnail: UIImage?,
+                               location: CLLocation?,
+                               date: Date) {
+        PhotoLibrarySaver.save(data, format: format, location: location, creationDate: date) { [weak self] error in
             guard let self else { return }
             self.releaseSlot()
             self.publish { controller in
@@ -698,13 +728,17 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
             return
         }
 
-        // 프레임에 첨부된 EXIF(노출, ISO, 렌즈 정보 등)
-        let attachments = CMCopyDictionaryOfAttachments(
-            allocator: kCFAllocatorDefault,
-            target: sampleBuffer,
-            attachmentMode: kCMAttachmentMode_ShouldPropagate
-        ) as? [String: Any]
-        let exif = attachments?[kCGImagePropertyExifDictionary as String] as? [String: Any] ?? [:]
+        // 프레임에 첨부된 모든 메타데이터({Exif}, {MakerApple} 등) + 이 순간의 카메라 상태(보충용)
+        let attachments = MetadataBuilder.metadataAttachments(of: sampleBuffer)
+        let device = (connection.inputPorts.first?.input as? AVCaptureDeviceInput)?.device
+        let context = FrameCaptureContext(
+            device: device,
+            fallbackPosition: request.position,
+            date: Date(),
+            wideColor: request.wideColor,
+            location: request.location,
+            heading: request.heading
+        )
 
         // 버퍼는 센서 기본 방향 그대로 → 촬영 시점의 수평 각도만큼 회전(커넥션이 이미 적용한 각도는 제외)
         let remaining = CameraController.normalizedAngle(request.rotationAngle - connection.videoRotationAngle)
@@ -723,13 +757,20 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         processingQueue.async { [weak self] in
             guard let self else { return }
-            guard let encoded = ImageEncoder.encode(cgImage, preferred: request.format, exif: exif) else {
+            let metadata = MetadataBuilder.frameMetadata(
+                attachments: attachments,
+                width: cgImage.width,
+                height: cgImage.height,
+                context: context
+            )
+            guard let encoded = ImageEncoder.encode(cgImage, preferred: request.format, metadata: metadata) else {
                 self.releaseSlot()
                 self.publish { $0.toast = "이미지를 저장하지 못했습니다." }
                 return
             }
             let thumbnail = ImageEncoder.thumbnail(from: cgImage)
-            self.saveToLibrary(encoded.data, format: encoded.format, thumbnail: thumbnail)
+            self.saveToLibrary(encoded.data, format: encoded.format, thumbnail: thumbnail,
+                               location: request.location, date: context.date)
         }
     }
 }

@@ -8,6 +8,7 @@ enum SettingsKey {
     static let showGrid = "showGrid"
     static let hapticOnCapture = "hapticOnCapture"
     static let forceFrameEngine = "forceFrameEngine"
+    static let saveLocation = "saveLocation"
 }
 
 enum SaveFormat: String, CaseIterable, Identifiable {
@@ -35,13 +36,16 @@ enum SaveFormat: String, CaseIterable, Identifiable {
 struct CaptureOptions {
     let saveFormat: SaveFormat
     let mirrorFrontCamera: Bool
+    /// 기본값 true (설정에서 끌 수 있음)
+    let saveLocation: Bool
 
     static func current() -> CaptureOptions {
         let defaults = UserDefaults.standard
         let format = SaveFormat(rawValue: defaults.string(forKey: SettingsKey.saveFormat) ?? "") ?? .heic
         return CaptureOptions(
             saveFormat: format,
-            mirrorFrontCamera: defaults.bool(forKey: SettingsKey.mirrorFrontCamera)
+            mirrorFrontCamera: defaults.bool(forKey: SettingsKey.mirrorFrontCamera),
+            saveLocation: defaults.object(forKey: SettingsKey.saveLocation) as? Bool ?? true
         )
     }
 }
