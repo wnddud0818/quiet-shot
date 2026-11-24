@@ -80,6 +80,19 @@ struct SettingsView: View {
                 } footer: {
                     Text("셔터: 탭하면 촬영, 길게 누르면 연속 촬영. 볼륨 버튼·카메라 제어 버튼으로도 촬영할 수 있습니다.\n미리보기: 탭하면 초점, 길게 누르면 AE/AF 잠금, 초점 표시 후 위아래로 끌면 노출 조절, 위로 쓸어 올리면 빠른 설정.\n줌: 버튼을 탭하거나 좌우로 끌면 다이얼이 나타납니다. 전면 카메라는 0.8(넓게)·1×(표준)를 지원합니다.\n햅틱은 조용한 곳에서 진동음이 들릴 수 있어 기본으로 꺼져 있습니다.")
                 }
+
+                Section {
+                    ForEach(camera.diagnostics, id: \.self) { line in
+                        Text(line)
+                    }
+                    Text("미리보기 프레임: \(Int(camera.previewFrameSize.width))×\(Int(camera.previewFrameSize.height)) · 회전 \(Int(camera.previewRotationAngle))° (표시 \(Int(camera.previewDisplayAngle))°)")
+                } header: {
+                    Text("진단 정보")
+                } footer: {
+                    Text("문제가 있으면 이 화면을 캡처해서 알려 주세요.")
+                }
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
             }
             .navigationTitle("설정")
             .navigationBarTitleDisplayMode(.inline)

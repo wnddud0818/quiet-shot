@@ -377,8 +377,11 @@ struct CameraScreen: View {
         let ratio = landscape ? 1 / aspectRatio.portraitAspect : aspectRatio.portraitAspect
         return GeometryReader { proxy in
             CameraPreview(
-                session: camera.session,
-                onLayerReady: { camera.attach(previewLayer: $0) },
+                camera: camera,
+                rotationAngle: camera.previewDisplayAngle,
+                mirrored: camera.position == .front,
+                bufferSize: camera.previewFrameSize,
+                connectionAngle: camera.videoConnectionAngle,
                 onTap: handleTap,
                 onLongPress: handleLongPress,
                 onPinch: handlePinch,
