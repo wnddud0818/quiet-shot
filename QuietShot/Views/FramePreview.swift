@@ -9,41 +9,35 @@ import UIKit
 /// - 저장되는 프레임과 똑같은 영상이 보임 (미리보기 = 결과물)
 /// - 같은 프레임을 여러 화면(iPhone Duo 바깥 화면)에 동시에 보낼 수 있음 (세션에 미리보기 레이어를 더 붙이지 않음)
 final class FramePreviewView: UIView {
-    let displayLayer = AVSampleBufferDisplayLayer()
+    private let displayLayer = AVSampleBufferDisplayLayer()
+    private let camera: CameraController
+    private let source: CameraController.PreviewSource
+    private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
+    private var rotationObservation: NSKeyValueObservation?
 
     /// 들어오는 버퍼에 추가로 적용할 시계방향 회전(도). 0/90/180/270
-    var rotationAngle: CGFloat = 0 {
+    private var rotationAngle: CGFloat = 0 {
         didSet { if oldValue != rotationAngle { setNeedsLayout() } }
     }
     /// 화면에서 좌우 반전 (전면 카메라 셀카 미리보기)
-    var mirrored = false {
-        didSet { if oldValue != mirrored { setNeedsLayout() } }
-    }
+    private let mirrored: Bool
     /// 들어오는 버퍼 크기 (탭 위치 → 초점 좌표 변환용)
     var bufferSize: CGSize = .zero
-    /// 데이터 출력 커넥션이 버퍼에 이미 적용해 둔 회전(도)
-    var connectionAngle: CGFloat = 0
+    var onRotationChange: ((CGFloat) -> Void)?
 
-    /// 인터페이스 방향 변화 (iPhone Duo 안쪽 화면처럼 앱 화면이 가로로 돌아가는 경우)
-    var onInterfaceOrientationChange: ((UIInterfaceOrientation) -> Void)?
-    private var lastOrientation: UIInterfaceOrientation = .unknown
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        setUp()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setUp()
-    }
-
-    private func setUp() {
+    init(camera: CameraController, source: CameraController.PreviewSource, mirrored: Bool) {
+        self.camera = camera
+        self.source = source
+        self.mirrored = mirrored
+        super.init(frame: .zero)
         backgroundColor = .black
         clipsToBounds = true
         displayLayer.videoGravity = .resizeAspectFill
         layer.addSublayer(displayLayer)
     }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -59,12 +53,25 @@ final class FramePreviewView: UIView {
         }
         displayLayer.transform = transform
         CATransaction.commit()
-        reportInterfaceOrientation()
     }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        reportInterfaceOrientation()
+        let renderer = displayLayer.sampleBufferRenderer
+        camera.removePreviewRenderer(renderer)
+        rotationObservation?.invalidate()
+        rotationCoordinator = nil
+        guard window != nil else { return }
+
+        let coordinator = AVCaptureDevice.RotationCoordinator(device: source.device, previewLayer: displayLayer)
+        rotationCoordinator = coordinator
+        rotationObservation = coordinator.observe(\.videoRotationAngleForHorizonLevelPreview, options: [.initial, .new]) { [weak self] current, _ in
+            guard let self, self.rotationCoordinator === current else { return }
+            self.rotationAngle = current.videoRotationAngleForHorizonLevelPreview - self.source.connectionAngle
+            self.onRotationChange?(current.videoRotationAngleForHorizonLevelPreview)
+        }
+        layoutIfNeeded()
+        camera.addPreviewRenderer(renderer, for: source.connection)
     }
 
     /// 화면 좌표 → 초점/노출 관심 지점 (센서 기준 0~1)
@@ -75,15 +82,8 @@ final class FramePreviewView: UIView {
             bufferSize: bufferSize,
             rotationQuarters: FramePreviewMath.quarterTurns(rotationAngle),
             mirrored: mirrored,
-            connectionQuarters: FramePreviewMath.quarterTurns(connectionAngle)
+            connectionQuarters: FramePreviewMath.quarterTurns(source.connectionAngle)
         )
-    }
-
-    private func reportInterfaceOrientation() {
-        guard let orientation = window?.windowScene?.effectiveGeometry.interfaceOrientation,
-              orientation != lastOrientation else { return }
-        lastOrientation = orientation
-        onInterfaceOrientationChange?(orientation)
     }
 }
 
@@ -131,39 +131,11 @@ enum FramePreviewMath {
 /// 카메라 컨트롤러에 프레임 렌더러를 등록·해제하는 미리보기 (iPhone Duo 바깥 화면용)
 struct OuterFramePreview: UIViewRepresentable {
     let camera: CameraController
-    let rotationAngle: CGFloat
-    let mirrored: Bool
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(camera: camera)
-    }
+    let source: CameraController.PreviewSource
 
     func makeUIView(context: Context) -> FramePreviewView {
-        let view = FramePreviewView()
-        let renderer = view.displayLayer.sampleBufferRenderer
-        context.coordinator.renderer = renderer
-        camera.addPreviewRenderer(renderer)
-        updateUIView(view, context: context)
-        return view
+        FramePreviewView(camera: camera, source: source, mirrored: source.device.position == .back)
     }
 
-    func updateUIView(_ uiView: FramePreviewView, context: Context) {
-        uiView.rotationAngle = rotationAngle
-        uiView.mirrored = mirrored
-    }
-
-    static func dismantleUIView(_ uiView: FramePreviewView, coordinator: Coordinator) {
-        if let renderer = coordinator.renderer {
-            coordinator.camera.removePreviewRenderer(renderer)
-        }
-    }
-
-    final class Coordinator {
-        let camera: CameraController
-        var renderer: AVSampleBufferVideoRenderer?
-
-        init(camera: CameraController) {
-            self.camera = camera
-        }
-    }
+    func updateUIView(_ uiView: FramePreviewView, context: Context) {}
 }

@@ -85,7 +85,11 @@ struct SettingsView: View {
                     ForEach(camera.diagnostics, id: \.self) { line in
                         Text(line)
                     }
-                    Text("미리보기 프레임: \(Int(camera.previewFrameSize.width))×\(Int(camera.previewFrameSize.height)) · 회전 \(Int(camera.previewRotationAngle))° (표시 \(Int(camera.previewDisplayAngle))°)")
+                    Text("미리보기 프레임: \(Int(camera.previewFrameSize.width))×\(Int(camera.previewFrameSize.height))")
+                    if let angle = camera.mainPreviewRotationAngle, let source = camera.previewSource {
+                        let displayed = CameraController.normalizedAngle(angle - source.connectionAngle)
+                        Text("본 화면 회전: \(Int(angle))° (표시 \(Int(displayed))°)")
+                    }
                 } header: {
                     Text("진단 정보")
                 } footer: {

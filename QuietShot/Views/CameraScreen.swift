@@ -25,7 +25,7 @@ struct CameraScreen: View {
     @State private var pinchStartFactor: CGFloat?
 
     @State private var flashOpacity: Double = 0
-    @State private var flipAngle: Double = 0
+    @State private var flipButtonAngle: Double = 0
     @State private var thumbnailScale: CGFloat = 1
     @State private var countdownTask: Task<Void, Never>?
     @State private var hardwareHoldTask: Task<Void, Never>?
@@ -33,26 +33,15 @@ struct CameraScreen: View {
     @State private var interfaceAngle: Double = 0
 
     // iPhone Duo
-    @State private var hingePartiallyOpen = false
     @State private var outerPreviewEnabled = true
     @State private var outerPreviewAvailable = false
 
     /// 셀프 타이머 남은 초 (바깥 화면과 공유)
     private var countdown: Int? { camera.countdown }
 
-    /// iPhone Duo 안쪽 화면(가로·세로 모두 regular)
-    private var isInnerDisplay: Bool {
-        horizontalSizeClass == .regular && verticalSizeClass == .regular
-    }
-
-    /// 빠른 설정이 항상 펼쳐져 있는 화면(Duo 안쪽 화면·반쯤 접힘)인지
-    private var usesPersistentControls: Bool {
-        isInnerDisplay || hingePartiallyOpen
-    }
-
     var body: some View {
         GeometryReader { geometry in
-            let landscape = geometry.size.width > geometry.size.height * 1.05
+            let landscape = geometry.size.width > geometry.size.height
             ZStack {
                 Color.black.ignoresSafeArea()
                 switch camera.status {
@@ -67,6 +56,13 @@ struct CameraScreen: View {
                 }
             }
             .overlay(alignment: .top) { toastView }
+        }
+        .background {
+            CameraWindowObserver(
+                onForwardFacingCamerasChange: camera.updateForwardFacingCameras,
+                onInterfaceOrientationChange: { interfaceAngle = Self.angle(for: $0) }
+            )
+            .allowsHitTesting(false)
         }
         .statusBarHidden()
         .persistentSystemOverlays(.hidden)
@@ -146,16 +142,19 @@ struct CameraScreen: View {
     private func runningContent(geometry: GeometryProxy, landscape: Bool) -> some View {
         let size = geometry.size
         let regions = DuoRegions.read(geometry)
-        let fold = regions.fold ?? (hingePartiallyOpen ? Self.syntheticFold(in: size) : nil)
+        let fold = regions.fold
+        let innerDisplay = regions.hasDivision || outerPreviewAvailable
+            || (horizontalSizeClass == .regular && verticalSizeClass == .regular)
+        let persistentControls = fold != nil || innerDisplay
         let previewLandscape: Bool = {
             guard let fold else { return landscape }
             return fold.width >= fold.height ? size.width > fold.minY : fold.minX > size.height
         }()
 
-        Group {
+        ZStack {
             if let fold {
                 foldedLayout(fold: fold, size: size)
-            } else if isInnerDisplay {
+            } else if innerDisplay {
                 innerDisplayLayout(landscape: landscape)
                     .padding(regions.occlusionInsets(in: size))
             } else if landscape {
@@ -166,12 +165,10 @@ struct CameraScreen: View {
                     .padding(regions.occlusionInsets(in: size))
             }
         }
-        .modifier(DuoHingeObserver(isPartiallyOpen: $hingePartiallyOpen))
         .modifier(OuterDisplayAccessory(camera: camera, isEnabled: $outerPreviewEnabled, isAvailable: $outerPreviewAvailable))
-        .animation(.spring(response: 0.4, dampingFraction: 0.88), value: fold == nil)
         .onAppear { camera.setInterfaceLandscape(previewLandscape) }
         .onChange(of: previewLandscape) { _, value in camera.setInterfaceLandscape(value) }
-        .onChange(of: usesPersistentControls) { _, persistent in
+        .onChange(of: persistentControls, initial: true) { _, persistent in
             if persistent { drawerOpen = false }
         }
     }
@@ -182,24 +179,24 @@ struct CameraScreen: View {
         if fold.width >= fold.height {
             // 가로 접는 선(탁상 모드): 위 = 미리보기, 아래 = 조작부
             VStack(spacing: 0) {
-                previewArea(landscape: size.width > fold.minY)
+                previewArea(landscape: size.width > fold.minY, persistentControls: true)
                     .padding(.top, 8)
                     .frame(maxWidth: .infinity)
                     .frame(height: max(fold.minY, 0))
                 Color.clear.frame(height: fold.height)
-                foldControls
+                foldControls(horizontalFold: true)
                     .frame(maxWidth: .infinity)
                     .frame(height: max(size.height - fold.maxY, 0))
             }
         } else {
             // 세로 접는 선(책 모드): 왼쪽 = 미리보기, 오른쪽 = 조작부
             HStack(spacing: 0) {
-                previewArea(landscape: fold.minX > size.height)
+                previewArea(landscape: fold.minX > size.height, persistentControls: true)
                     .padding(.leading, 8)
                     .frame(maxHeight: .infinity)
                     .frame(width: max(fold.minX, 0))
                 Color.clear.frame(width: fold.width)
-                foldControls
+                foldControls(horizontalFold: false)
                     .frame(maxHeight: .infinity)
                     .frame(width: max(size.width - fold.maxX, 0))
             }
@@ -207,16 +204,16 @@ struct CameraScreen: View {
     }
 
     /// 접은 화면 아래쪽(또는 오른쪽) 조작부: 큰 셔터, 썸네일·전환, 항상 펼쳐진 빠른 설정
-    private var foldControls: some View {
+    private func foldControls(horizontalFold: Bool) -> some View {
         VStack(spacing: 14) {
             HStack {
                 torchButton
                 Spacer()
-                Label("탁상 모드", systemImage: "laptopcomputer")
+                Label(horizontalFold ? "탁상 모드" : "책 모드", systemImage: horizontalFold ? "laptopcomputer" : "book")
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .foregroundStyle(Theme.accent)
                 Spacer()
-                statusPill(vertical: false)
+                statusPill(vertical: false, persistentControls: true)
             }
             Spacer(minLength: 0)
             bottomControls(vertical: false)
@@ -242,10 +239,10 @@ struct CameraScreen: View {
                 }
                 .padding(.vertical, 20)
                 .frame(width: 92)
-                previewArea(landscape: true)
+                previewArea(landscape: true, persistentControls: true)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 VStack(spacing: 14) {
-                    statusPill(vertical: false)
+                    statusPill(vertical: false, persistentControls: true)
                         .scaleEffect(0.9)
                     bottomControls(vertical: true)
                         .scaleEffect(1.1)
@@ -260,11 +257,11 @@ struct CameraScreen: View {
                     Spacer()
                     quickControls(vertical: false)
                     Spacer()
-                    statusPill(vertical: false)
+                    statusPill(vertical: false, persistentControls: true)
                 }
                 .padding(.horizontal, 18)
                 .padding(.top, 8)
-                previewArea(landscape: false)
+                previewArea(landscape: false, persistentControls: true)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 bottomControls(vertical: false)
                     .scaleEffect(1.1)
@@ -286,14 +283,6 @@ struct CameraScreen: View {
             vertical: vertical,
             onOpenSettings: { showSettings = true }
         )
-    }
-
-    /// 힌지는 반쯤 열렸는데 접는 선 영역을 못 받은 경우: 긴 변의 가운데로 가정
-    static func syntheticFold(in size: CGSize) -> CGRect {
-        if size.height >= size.width {
-            return CGRect(x: 0, y: size.height / 2 - 8, width: size.width, height: 16)
-        }
-        return CGRect(x: size.width / 2 - 8, y: 0, width: 16, height: size.height)
     }
 
     private var iconAngle: Angle {
@@ -337,9 +326,9 @@ struct CameraScreen: View {
     }
 
     /// 무음 표시 + 해상도 + 빠른 설정 열기
-    private func statusPill(vertical: Bool) -> some View {
+    private func statusPill(vertical: Bool, persistentControls: Bool = false) -> some View {
         Button {
-            guard !usesPersistentControls else { return }
+            guard !persistentControls else { return }
             Haptics.selection()
             withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) { drawerOpen.toggle() }
         } label: {
@@ -352,7 +341,7 @@ struct CameraScreen: View {
                     Text("\(captureTimer.rawValue)")
                         .monospacedDigit()
                 }
-                if !usesPersistentControls {
+                if !persistentControls {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 10, weight: .bold))
                         .rotationEffect(.degrees(drawerOpen ? 180 : 0))
@@ -373,23 +362,26 @@ struct CameraScreen: View {
 
     // MARK: - 미리보기
 
-    private func previewArea(landscape: Bool) -> some View {
+    private func previewArea(landscape: Bool, persistentControls: Bool = false) -> some View {
         let ratio = landscape ? 1 / aspectRatio.portraitAspect : aspectRatio.portraitAspect
         return GeometryReader { proxy in
-            CameraPreview(
-                camera: camera,
-                rotationAngle: camera.previewDisplayAngle,
-                mirrored: camera.position == .front,
-                bufferSize: camera.previewFrameSize,
-                connectionAngle: camera.videoConnectionAngle,
-                onTap: handleTap,
-                onLongPress: handleLongPress,
-                onPinch: handlePinch,
-                onPan: handlePan,
-                onHardwareShutter: handleHardwareShutter,
-                onForwardFacingCamerasChange: { camera.updateForwardFacingCameras($0) },
-                onInterfaceOrientationChange: { interfaceAngle = Self.angle(for: $0) }
-            )
+            ZStack {
+                Color.black
+                if let source = camera.previewSource {
+                    CameraPreview(
+                        camera: camera,
+                        source: source,
+                        bufferSize: camera.previewFrameSize,
+                        onTap: handleTap,
+                        onLongPress: handleLongPress,
+                        onPinch: handlePinch,
+                        onPan: { handlePan($0, $1, persistentControls: persistentControls) },
+                        onHardwareShutter: handleHardwareShutter
+                    )
+                    .id(source.id)
+                    .transition(.identity)
+                }
+            }
             .overlay {
                 if showGrid { GridOverlay().allowsHitTesting(false) }
             }
@@ -416,20 +408,19 @@ struct CameraScreen: View {
                 Color.black.opacity(flashOpacity).allowsHitTesting(false)
             }
             .overlay { countdownView }
-            .overlay(alignment: .top) { topOverlay }
+            .overlay(alignment: .top) { topOverlay(persistentControls: persistentControls) }
             .overlay(alignment: .bottom) { zoomOverlay }
         }
         .aspectRatio(ratio, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: landscape ? 18 : 0, style: .continuous))
-        .rotation3DEffect(.degrees(flipAngle), axis: (x: 0, y: 1, z: 0), perspective: 0.6)
         .animation(.easeInOut(duration: 0.22), value: aspectRatio)
         .animation(.easeInOut(duration: 0.2), value: camera.isSwitchingCamera)
         .onChange(of: camera.captureTick) { _, _ in flashCapture() }
     }
 
-    private var topOverlay: some View {
+    private func topOverlay(persistentControls: Bool) -> some View {
         VStack(spacing: 8) {
-            if drawerOpen && !usesPersistentControls {
+            if drawerOpen && !persistentControls {
                 quickControls(vertical: false)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
@@ -496,6 +487,7 @@ struct CameraScreen: View {
             onBurstEnd: { camera.stopBurst() }
         )
         let flip = CircleIconButton(systemName: "arrow.triangle.2.circlepath", size: 52, action: flipCamera)
+            .rotationEffect(.degrees(flipButtonAngle))
             .rotationEffect(iconAngle)
             .accessibilityLabel("전면/후면 전환")
 
@@ -600,7 +592,7 @@ struct CameraScreen: View {
     }
 
     /// 초점 표시가 있으면 위아래 드래그 = 노출 보정, 없으면 위로 = 빠른 설정 열기 / 아래로 = 닫기
-    private func handlePan(_ state: UIGestureRecognizer.State, _ translation: CGSize) {
+    private func handlePan(_ state: UIGestureRecognizer.State, _ translation: CGSize, persistentControls: Bool) {
         switch state {
         case .began:
             exposureDragStart = focus != nil ? camera.exposureBias : nil
@@ -613,7 +605,7 @@ struct CameraScreen: View {
                 camera.setExposureBias(start - Float(translation.height / 110))
             }
         default:
-            if exposureDragStart == nil, !usesPersistentControls, abs(translation.height) > abs(translation.width) {
+            if exposureDragStart == nil, !persistentControls, abs(translation.height) > abs(translation.width) {
                 if translation.height < -40 {
                     withAnimation { drawerOpen = true }
                 } else if translation.height > 40 {
@@ -732,21 +724,14 @@ struct CameraScreen: View {
         }
     }
 
-    /// 전면/후면 전환: 미리보기를 세로축으로 뒤집으며 전환 (전환 중 흐림)
+    /// 전환 애니메이션은 버튼에만 적용해 회전 코디네이터의 기준 레이어를 고정한다.
     private func flipCamera() {
+        guard !camera.isSwitchingCamera else { return }
         Haptics.selection()
         cancelCountdown()
         focus = nil
-        withAnimation(.easeIn(duration: 0.18)) { flipAngle = 90 }
+        withAnimation(.easeInOut(duration: 0.25)) { flipButtonAngle += 180 }
         camera.switchCamera()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) { flipAngle = -90 }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
-                withAnimation(.easeOut(duration: 0.26)) { flipAngle = 0 }
-            }
-        }
     }
 
     // MARK: - Helpers

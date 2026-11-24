@@ -13,23 +13,19 @@ enum HardwareShutterPhase {
 /// 본 화면 카메라 미리보기 (프레임을 직접 그리는 FramePreviewView) + 카메라 제스처.
 /// - 탭: 초점/노출, 길게 누르기: AE/AF 잠금, 두 손가락 핀치: 줌, 한 손가락 위아래 드래그: 노출 또는 빠른 설정
 /// - 볼륨 버튼·카메라 제어 버튼: 셔터 (iOS 17.2+)
-/// - iPhone Duo: 사용자 쪽을 향한 전면 카메라 추적 (iOS 27.1+)
 struct CameraPreview: UIViewRepresentable {
     let camera: CameraController
-    let rotationAngle: CGFloat
-    let mirrored: Bool
+    let source: CameraController.PreviewSource
     let bufferSize: CGSize
-    let connectionAngle: CGFloat
     let onTap: (_ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void
     let onLongPress: (_ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void
     let onPinch: (_ state: UIGestureRecognizer.State, _ scale: CGFloat) -> Void
     let onPan: (_ state: UIGestureRecognizer.State, _ translation: CGSize) -> Void
     let onHardwareShutter: (HardwareShutterPhase) -> Void
-    let onForwardFacingCamerasChange: ([String]) -> Void
-    let onInterfaceOrientationChange: (UIInterfaceOrientation) -> Void
 
     func makeUIView(context: Context) -> FramePreviewView {
-        let view = FramePreviewView()
+        let view = FramePreviewView(camera: camera, source: source, mirrored: source.device.position == .front)
+        view.onRotationChange = { camera.reportMainPreviewRotation($0, for: source) }
         let coordinator = context.coordinator
 
         let tap = UITapGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleTap(_:)))
@@ -41,38 +37,14 @@ struct CameraPreview: UIViewRepresentable {
         pan.maximumNumberOfTouches = 1
         [tap, longPress, pinch, pan].forEach(view.addGestureRecognizer)
 
-        view.onInterfaceOrientationChange = { [weak coordinator] orientation in
-            coordinator?.parent.onInterfaceOrientationChange(orientation)
-        }
         coordinator.installHardwareShutter(on: view)
-        coordinator.installDirectionCoordinator(on: view)
-
-        // 프레임 받기 시작 + 회전 기준 등록
-        let renderer = view.displayLayer.sampleBufferRenderer
-        coordinator.renderer = renderer
-        camera.addPreviewRenderer(renderer)
-        camera.attach(previewView: view)
-
-        apply(to: view)
+        view.bufferSize = bufferSize
         return view
     }
 
     func updateUIView(_ uiView: FramePreviewView, context: Context) {
         context.coordinator.parent = self
-        apply(to: uiView)
-    }
-
-    static func dismantleUIView(_ uiView: FramePreviewView, coordinator: Coordinator) {
-        if let renderer = coordinator.renderer {
-            coordinator.parent.camera.removePreviewRenderer(renderer)
-        }
-    }
-
-    private func apply(to view: FramePreviewView) {
-        view.rotationAngle = rotationAngle
-        view.mirrored = mirrored
-        view.bufferSize = bufferSize
-        view.connectionAngle = connectionAngle
+        uiView.bufferSize = bufferSize
     }
 
     func makeCoordinator() -> Coordinator {
@@ -82,9 +54,7 @@ struct CameraPreview: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject {
         var parent: CameraPreview
-        var renderer: AVSampleBufferVideoRenderer?
         private var eventInteraction: UIInteraction?
-        private var directionCoordinator: AnyObject?
 
         init(parent: CameraPreview) {
             self.parent = parent
@@ -129,13 +99,50 @@ struct CameraPreview: UIViewRepresentable {
             view.addInteraction(interaction)
             eventInteraction = interaction
         }
+    }
+}
 
-        // MARK: iPhone Duo — 어느 전면 카메라가 사용자를 향하는지
+/// 접힘이나 카메라 전환으로 미리보기가 교체되어도 본 화면을 기준으로 방향을 추적한다.
+struct CameraWindowObserver: UIViewRepresentable {
+    let onForwardFacingCamerasChange: ([String]) -> Void
+    let onInterfaceOrientationChange: (UIInterfaceOrientation) -> Void
 
-        func installDirectionCoordinator(on view: UIView) {
-            // iPhone Duo가 아니거나 iOS 27.1 SDK가 아니면 nil
-            directionCoordinator = DuoSupport.makeDirectionCoordinator(view: view) { [weak self] ids in
-                self?.parent.onForwardFacingCamerasChange(ids)
+    func makeUIView(context: Context) -> ObserverView {
+        let view = ObserverView()
+        updateUIView(view, context: context)
+        return view
+    }
+
+    func updateUIView(_ view: ObserverView, context: Context) {
+        view.onForwardFacingCamerasChange = onForwardFacingCamerasChange
+        view.onInterfaceOrientationChange = onInterfaceOrientationChange
+    }
+
+    final class ObserverView: UIView {
+        var onForwardFacingCamerasChange: (([String]) -> Void)?
+        var onInterfaceOrientationChange: ((UIInterfaceOrientation) -> Void)?
+        private var directionCoordinator: AnyObject?
+        private var geometryObservation: NSKeyValueObservation?
+        private var lastOrientation: UIInterfaceOrientation = .unknown
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            geometryObservation?.invalidate()
+            directionCoordinator = nil
+            lastOrientation = .unknown
+            guard let scene = window?.windowScene else { return }
+            directionCoordinator = DuoSupport.makeDirectionCoordinator(view: self) { [weak self, weak scene] ids in
+                guard let self, let scene, self.window?.windowScene === scene else { return }
+                self.onForwardFacingCamerasChange?(ids)
+            }
+            geometryObservation = scene.observe(\.effectiveGeometry, options: [.initial, .new]) { [weak self] scene, _ in
+                DispatchQueue.main.async {
+                    guard let self, self.window?.windowScene === scene else { return }
+                    let orientation = scene.effectiveGeometry.interfaceOrientation
+                    guard orientation != .unknown, orientation != self.lastOrientation else { return }
+                    self.lastOrientation = orientation
+                    self.onInterfaceOrientationChange?(orientation)
+                }
             }
         }
     }

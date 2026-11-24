@@ -41,7 +41,7 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var status: Status = .idle
     @Published private(set) var engine: Engine = .videoFrame
     @Published private(set) var outputDimensions = CMVideoDimensions(width: 0, height: 0)
-    @Published private(set) var position: AVCaptureDevice.Position = .back
+    var position: AVCaptureDevice.Position { previewSource?.device.position ?? .back }
     @Published private(set) var zoom: ZoomConfiguration = .single
     @Published private(set) var zoomFactor: CGFloat = 1
     @Published private(set) var exposureBias: Float = 0
@@ -61,19 +61,19 @@ final class CameraController: NSObject, ObservableObject {
     @Published var toast: String?
     /// 셀프 타이머 남은 초 (본 화면과 iPhone Duo 바깥 화면이 함께 표시)
     @Published var countdown: Int?
-    /// 미리보기 회전각 (RotationCoordinator 기준, 바깥 화면 미리보기도 같은 각도로)
-    @Published private(set) var previewRotationAngle: CGFloat = 90
-    /// 비디오 데이터 출력이 버퍼에 이미 적용한 회전각
-    @Published private(set) var videoConnectionAngle: CGFloat = 0
+    struct PreviewSource: Identifiable {
+        let device: AVCaptureDevice
+        let connection: AVCaptureConnection
+        let connectionAngle: CGFloat
+        var id: ObjectIdentifier { ObjectIdentifier(connection) }
+    }
+    @Published private(set) var previewSource: PreviewSource?
+    /// 설정의 진단 표시용. 렌더링에는 각 화면의 코디네이터를 직접 사용한다.
+    @Published private(set) var mainPreviewRotationAngle: CGFloat?
     /// 미리보기로 들어오는 프레임 크기
     @Published private(set) var previewFrameSize = CGSize.zero
     /// 설정 > 진단 정보 (기기에서 문제를 추적할 때 사용)
     @Published private(set) var diagnostics: [String] = []
-
-    /// 미리보기에 적용할 추가 회전 (버퍼 기준 시계방향)
-    var previewDisplayAngle: CGFloat {
-        CameraController.normalizedAngle(previewRotationAngle - videoConnectionAngle)
-    }
 
     /// 광각 기준 표시 배율 (예: 0.5×, 1×, 2.3×, 5×)
     var displayZoom: CGFloat { zoom.display(for: zoomFactor) }
@@ -121,23 +121,21 @@ final class CameraController: NSObject, ObservableObject {
     private var lastFrameSize = CGSize.zero
     private var frameEngineOnVideoQueue = true
     private var awaitingFirstFrame = false
+    private var activeVideoConnection: AVCaptureConnection?
 
     /// 미리보기 렌더러들 (본 화면 + iPhone Duo 바깥 화면). 프레임마다 그대로 보냄
     private let rendererLock = NSLock()
-    private var previewRenderers: [ObjectIdentifier: AVSampleBufferVideoRenderer] = [:]
+    private var previewRenderers: [ObjectIdentifier: (AVSampleBufferVideoRenderer, AVCaptureConnection)] = [:]
 
     // MARK: - 메인 스레드 전용
 
-    private weak var previewHostLayer: CALayer?
-    private var coordinatorDevice: AVCaptureDevice?
-    private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
-    private var rotationObservation: NSKeyValueObservation?
-    private var pendingCoordinatorDevice: AVCaptureDevice?
+    private var captureRotationCoordinator: AVCaptureDevice.RotationCoordinator?
     private var burstTimer: Timer?
 
     // MARK: - 캡처 파이프라인 (락으로 보호)
 
     private struct FrameRequest {
+        let connection: AVCaptureConnection
         let rotationAngle: CGFloat
         let mirrored: Bool
         let format: SaveFormat
@@ -222,38 +220,18 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Preview / 회전
-
-    /// 미리보기 뷰가 만들어질 때 호출 (메인 스레드). 레이아웃이 바뀌어 뷰가 새로 생겨도 회전 기준을 다시 잡음
-    func attach(previewView: FramePreviewView) {
-        previewHostLayer = previewView.layer
-        if let device = pendingCoordinatorDevice ?? coordinatorDevice {
-            pendingCoordinatorDevice = nil
-            setupRotationCoordinator(for: device)
-        }
-    }
-
-    /// RotationCoordinator: 회전 잠금과 무관하게 중력 기준으로 사진이 수평이 되도록 각도를 제공 (메인 스레드)
-    private func setupRotationCoordinator(for device: AVCaptureDevice) {
-        guard let previewHostLayer else {
-            pendingCoordinatorDevice = device
-            return
-        }
-        coordinatorDevice = device
-        let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: previewHostLayer)
-        rotationCoordinator = coordinator
-        previewRotationAngle = coordinator.videoRotationAngleForHorizonLevelPreview
-        rotationObservation = coordinator.observe(\.videoRotationAngleForHorizonLevelPreview, options: [.new]) { [weak self] coordinator, _ in
-            let angle = coordinator.videoRotationAngleForHorizonLevelPreview
-            DispatchQueue.main.async { self?.previewRotationAngle = angle }
-        }
-    }
-
     // MARK: - 프레임 미리보기 렌더러
 
-    func addPreviewRenderer(_ renderer: AVSampleBufferVideoRenderer) {
+    func reportMainPreviewRotation(_ angle: CGFloat, for source: PreviewSource) {
+        publish { controller in
+            guard controller.previewSource?.id == source.id, controller.mainPreviewRotationAngle != angle else { return }
+            controller.mainPreviewRotationAngle = angle
+        }
+    }
+
+    func addPreviewRenderer(_ renderer: AVSampleBufferVideoRenderer, for connection: AVCaptureConnection) {
         rendererLock.lock()
-        previewRenderers[ObjectIdentifier(renderer)] = renderer
+        previewRenderers[ObjectIdentifier(renderer)] = (renderer, connection)
         rendererLock.unlock()
     }
 
@@ -264,13 +242,13 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     /// 미리보기 렌더러들에 프레임 전달 (videoQueue)
-    private func sendToPreviews(_ sampleBuffer: CMSampleBuffer) {
+    private func sendToPreviews(_ sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         rendererLock.lock()
         let renderers = Array(previewRenderers.values)
         rendererLock.unlock()
         guard !renderers.isEmpty else { return }
         CameraController.markDisplayImmediately(sampleBuffer)
-        for renderer in renderers {
+        for (renderer, source) in renderers where source === connection {
             if renderer.status == .failed { renderer.flush() }
             guard renderer.isReadyForMoreMediaData else { continue }
             renderer.enqueue(sampleBuffer)
@@ -392,6 +370,9 @@ final class CameraController: NSObject, ObservableObject {
             videoOutput.alwaysDiscardsLateVideoFrames = true
             videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
             if let connection = videoOutput.connection(with: .video) {
+                if connection.isVideoRotationAngleSupported(0) {
+                    connection.videoRotationAngle = 0
+                }
                 if connection.isVideoMirroringSupported {
                     connection.automaticallyAdjustsVideoMirroring = false
                     connection.isVideoMirrored = false
@@ -446,16 +427,16 @@ final class CameraController: NSObject, ObservableObject {
         observe(device)
         applyDynamicAspectRatio(to: device)
         let isFrameEngine = selectedEngine == .videoFrame
-        videoQueue.async {
-            self.lastFrameSize = .zero
-            self.frameEngineOnVideoQueue = isFrameEngine
-            self.awaitingFirstFrame = true
+        guard let connection = videoOutput.connection(with: .video) else {
+            publish { $0.status = .unavailable("미리보기 연결을 구성할 수 없습니다.") }
+            return false
         }
-        let connectionAngle = videoOutput.connection(with: .video)?.videoRotationAngle ?? 0
+        let connectionAngle = connection.videoRotationAngle
+        let source = PreviewSource(device: device, connection: connection, connectionAngle: connectionAngle)
         let diagnostics = CameraController.diagnostics(for: device, engine: selectedEngine, connectionAngle: connectionAngle)
         // 새 카메라 프레임이 오지 않는 경우를 대비해 전환 가림막은 잠시 후 자동 해제
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.isSwitchingCamera = false
+            if self?.previewSource?.connection === connection { self?.isSwitchingCamera = false }
         }
 
         let torchAvailable = device.hasTorch && device.isTorchAvailable
@@ -467,7 +448,10 @@ final class CameraController: NSObject, ObservableObject {
             controller.engine = selectedEngine
             controller.shutterSuppressionSupported = suppressionSupported
             controller.outputDimensions = dimensions
-            controller.position = device.position
+            controller.captureRotationCoordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
+            controller.mainPreviewRotationAngle = nil
+            controller.previewFrameSize = .zero
+            controller.previewSource = source
             controller.zoom = zoomConfig
             controller.zoomFactor = zoomNow
             controller.exposureBias = biasNow
@@ -475,9 +459,13 @@ final class CameraController: NSObject, ObservableObject {
             controller.torchAvailable = torchAvailable
             controller.torchOn = false
             controller.cameraLabel = label
-            controller.videoConnectionAngle = connectionAngle
             controller.diagnostics = diagnostics
-            controller.setupRotationCoordinator(for: device)
+        }
+        videoQueue.async {
+            self.activeVideoConnection = connection
+            self.lastFrameSize = .zero
+            self.frameEngineOnVideoQueue = isFrameEngine
+            self.awaitingFirstFrame = true
         }
         return true
     }
@@ -548,7 +536,8 @@ final class CameraController: NSObject, ObservableObject {
             self.forwardFacingCameraIDs = ids
             guard self.isConfigured,
                   let current = self.videoInput?.device, current.position == .front,
-                  let facing = self.resolveFrontDevice(), facing.uniqueID != current.uniqueID else { return }
+                  let facing = CameraController.frontCandidates().first(where: { ids.contains($0.uniqueID) }),
+                  facing.uniqueID != current.uniqueID else { return }
             self.publish { $0.isSwitchingCamera = true }
             self.configureSession(with: facing)
         }
@@ -763,11 +752,12 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func capture(isBurst: Bool) {
-        guard status == .running else { return }
+        guard status == .running, !isSwitchingCamera, let source = previewSource,
+              let captureRotationCoordinator else { return }
         // 처리 대기 중인 촬영이 너무 많으면(메모리 보호) 연사 프레임은 건너뜀
         guard reserveSlot(limit: isBurst ? 3 : 8) else { return }
 
-        let angle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? 90
+        let angle = captureRotationCoordinator.videoRotationAngleForHorizonLevelCapture
         let options = CaptureOptions.current()
         let place = options.saveLocation ? LocationProvider.shared.snapshot() : .empty
         let landscape = deviceIsLandscape
@@ -776,7 +766,8 @@ final class CameraController: NSObject, ObservableObject {
 
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            guard let device = self.videoInput?.device else {
+            guard let device = self.videoInput?.device,
+                  self.videoOutput.connection(with: .video) === source.connection else {
                 self.releaseSlot()
                 return
             }
@@ -791,7 +782,7 @@ final class CameraController: NSObject, ObservableObject {
                 let wideColor = device.activeColorSpace == .P3_D65
                 let colorSpaceName = wideColor ? CGColorSpace.displayP3 : CGColorSpace.sRGB
                 let colorSpace = CGColorSpace(name: colorSpaceName) ?? CGColorSpaceCreateDeviceRGB()
-                let request = FrameRequest(rotationAngle: angle, mirrored: mirrored, format: options.saveFormat,
+                let request = FrameRequest(connection: source.connection, rotationAngle: angle, mirrored: mirrored, format: options.saveFormat,
                                            colorSpace: colorSpace, wideColor: wideColor, position: device.position,
                                            location: place.location, heading: place.heading,
                                            aspect: options.aspectRatio, preferLandscape: landscape)
@@ -975,11 +966,14 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
-        sendToPreviews(sampleBuffer)
+        guard connection === activeVideoConnection else { return }
+        sendToPreviews(sampleBuffer, from: connection)
 
         if awaitingFirstFrame {
             awaitingFirstFrame = false
-            publish { $0.isSwitchingCamera = false }
+            publish { controller in
+                if controller.previewSource?.connection === connection { controller.isSwitchingCamera = false }
+            }
         }
 
         // 실제로 들어오는 프레임 크기 (미리보기 좌표 변환, 프레임 엔진의 저장 해상도 표시)
@@ -990,6 +984,7 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
                 let isFrameEngine = frameEngineOnVideoQueue
                 let dimensions = CMVideoDimensions(width: Int32(size.width), height: Int32(size.height))
                 publish { controller in
+                    guard controller.previewSource?.connection === connection else { return }
                     controller.previewFrameSize = size
                     if isFrameEngine { controller.outputDimensions = dimensions }
                 }
@@ -997,7 +992,7 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
         }
 
         frameLock.lock()
-        let request = pendingFrameRequests.isEmpty ? nil : pendingFrameRequests.removeFirst()
+        let request = pendingFrameRequests.first?.connection === connection ? pendingFrameRequests.removeFirst() : nil
         frameLock.unlock()
 
         guard let request else { return }

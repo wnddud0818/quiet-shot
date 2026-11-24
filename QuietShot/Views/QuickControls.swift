@@ -107,7 +107,12 @@ struct QuickControls: View {
         if vertical {
             VStack(spacing: 4, content: content)
         } else {
-            HStack(spacing: 4, content: content)
+            let row = HStack(spacing: 4, content: content)
+            ViewThatFits(in: .horizontal) {
+                row.fixedSize(horizontal: true, vertical: false)
+                ScrollView(.horizontal) { row }
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
