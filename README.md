@@ -55,6 +55,14 @@ Swift + SwiftUI + AVFoundation으로 만든 **네이티브 iOS 무음 카메라 
 - 촬영 피드백은 소리 대신 화면 깜빡임
 - 사진 보관함에는 "사진 추가 전용" 권한만 사용
 
+## IPA 다운로드
+
+- 최신 빌드(서명 안 됨): **[QuietShot-unsigned.ipa](https://github.com/wnddud0818/quiet-shot/releases/latest/download/QuietShot-unsigned.ipa)**
+  (모든 빌드: [Releases](https://github.com/wnddud0818/quiet-shot/releases))
+- 서명되지 않은 IPA라 그대로는 설치되지 않습니다. PC/Mac에서 **Sideloadly** 또는 **AltStore**에 IPA를 넣고 본인 Apple ID로 서명해 설치하세요
+  (무료 Apple ID는 7일마다 재설치, 유료 개발자 계정은 1년). iPhone에서 *설정 > 개인정보 보호 및 보안 > 개발자 모드*를 켜야 합니다.
+- `main`에 푸시할 때마다 GitHub Actions가 새 IPA를 만들어 Releases에 올립니다.
+
 ## 빌드 & 설치
 
 1. Mac에서 **Xcode 16 이상**(iOS 27용은 Xcode 27 권장)으로 `QuietShot.xcodeproj`를 엽니다.

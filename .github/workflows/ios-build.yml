@@ -48,6 +48,8 @@ jobs:
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: xcode-27
     timeout-minutes: 30
+    permissions:
+      contents: write   # GitHub Release 생성용
     steps:
       - uses: actions/checkout@v5
 
@@ -81,7 +83,8 @@ jobs:
           cp -R "$APP" build/ipa/Payload/
           VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP/Info.plist")
           BUILD=$(/usr/libexec/PlistBuddy -c "Print CFBundleVersion" "$APP/Info.plist")
-          (cd build/ipa && zip -qry "../QuietShot-${VERSION}-${BUILD}-unsigned.ipa" Payload)
+          (cd build/ipa && zip -qry ../QuietShot-unsigned.ipa Payload)
+          echo "APP_VERSION=${VERSION}" >> "$GITHUB_ENV"
           ls -la build/*.ipa
           /usr/libexec/PlistBuddy -c "Print MinimumOSVersion" "$APP/Info.plist"
           lipo -info "$APP/QuietShot"
@@ -92,3 +95,29 @@ jobs:
           path: build/*.ipa
           if-no-files-found: error
           retention-days: 30
+
+      # main 푸시마다 Releases에 IPA를 올려 고정 링크로 받을 수 있게 함
+      # https://github.com/<owner>/<repo>/releases/latest/download/QuietShot-unsigned.ipa
+      - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="build-${GITHUB_RUN_NUMBER}"
+          NOTES="서명되지 않은 IPA입니다. Sideloadly 또는 AltStore로 본인 Apple ID 서명 후 설치하거나, Xcode에서 직접 실행하세요. iOS 17 이상. 커밋 ${GITHUB_SHA}"
+          DATA=$(printf '{"tag_name":"%s","target_commitish":"%s","name":"QuietShot %s (build %s)","body":"%s","make_latest":"true"}' \
+            "$TAG" "$GITHUB_SHA" "$APP_VERSION" "$GITHUB_RUN_NUMBER" "$NOTES")
+          RESPONSE=$(curl -fsSL -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases" \
+            -d "$DATA")
+          UPLOAD_URL=$(printf '%s' "$RESPONSE" | grep -o '"upload_url": *"[^"]*"' | sed -E 's/.*"(https[^"{]*).*/\1/')
+          echo "Upload URL: ${UPLOAD_URL}"
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @build/QuietShot-unsigned.ipa \
+            "${UPLOAD_URL}?name=QuietShot-unsigned.ipa" > /dev/null
+          echo "Download: https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/QuietShot-unsigned.ipa"
