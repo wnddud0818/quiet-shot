@@ -61,8 +61,19 @@ final class CameraController: NSObject, ObservableObject {
     @Published var toast: String?
     /// 셀프 타이머 남은 초 (본 화면과 iPhone Duo 바깥 화면이 함께 표시)
     @Published var countdown: Int?
-    /// 미리보기 회전각 (바깥 화면 미리보기도 같은 각도로)
+    /// 미리보기 회전각 (RotationCoordinator 기준, 바깥 화면 미리보기도 같은 각도로)
     @Published private(set) var previewRotationAngle: CGFloat = 90
+    /// 비디오 데이터 출력이 버퍼에 이미 적용한 회전각
+    @Published private(set) var videoConnectionAngle: CGFloat = 0
+    /// 미리보기로 들어오는 프레임 크기
+    @Published private(set) var previewFrameSize = CGSize.zero
+    /// 설정 > 진단 정보 (기기에서 문제를 추적할 때 사용)
+    @Published private(set) var diagnostics: [String] = []
+
+    /// 미리보기에 적용할 추가 회전 (버퍼 기준 시계방향)
+    var previewDisplayAngle: CGFloat {
+        CameraController.normalizedAngle(previewRotationAngle - videoConnectionAngle)
+    }
 
     /// 광각 기준 표시 배율 (예: 0.5×, 1×, 2.3×, 5×)
     var displayZoom: CGFloat { zoom.display(for: zoomFactor) }
@@ -106,12 +117,19 @@ final class CameraController: NSObject, ObservableObject {
     private var forwardFacingCameraIDs: [String] = []
     private var controlsDelegateInstalled = false
     private var interfaceIsLandscapeOnQueue = false
-    /// videoQueue 전용: 마지막으로 받은 프레임 크기
+    /// videoQueue 전용: 마지막으로 받은 프레임 크기, 지금 엔진, 카메라 전환 후 첫 프레임 대기
     private var lastFrameSize = CGSize.zero
+    private var frameEngineOnVideoQueue = true
+    private var awaitingFirstFrame = false
+
+    /// 미리보기 렌더러들 (본 화면 + iPhone Duo 바깥 화면). 프레임마다 그대로 보냄
+    private let rendererLock = NSLock()
+    private var previewRenderers: [ObjectIdentifier: AVSampleBufferVideoRenderer] = [:]
 
     // MARK: - 메인 스레드 전용
 
-    private weak var previewLayer: AVCaptureVideoPreviewLayer?
+    private weak var previewHostLayer: CALayer?
+    private var coordinatorDevice: AVCaptureDevice?
     private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
     private var rotationObservation: NSKeyValueObservation?
     private var pendingCoordinatorDevice: AVCaptureDevice?
@@ -206,10 +224,10 @@ final class CameraController: NSObject, ObservableObject {
 
     // MARK: - Preview / 회전
 
-    /// CameraPreview가 만들어질 때 호출 (메인 스레드)
-    func attach(previewLayer: AVCaptureVideoPreviewLayer) {
-        self.previewLayer = previewLayer
-        if let device = pendingCoordinatorDevice {
+    /// 미리보기 뷰가 만들어질 때 호출 (메인 스레드). 레이아웃이 바뀌어 뷰가 새로 생겨도 회전 기준을 다시 잡음
+    func attach(previewView: FramePreviewView) {
+        previewHostLayer = previewView.layer
+        if let device = pendingCoordinatorDevice ?? coordinatorDevice {
             pendingCoordinatorDevice = nil
             setupRotationCoordinator(for: device)
         }
@@ -217,24 +235,58 @@ final class CameraController: NSObject, ObservableObject {
 
     /// RotationCoordinator: 회전 잠금과 무관하게 중력 기준으로 사진이 수평이 되도록 각도를 제공 (메인 스레드)
     private func setupRotationCoordinator(for device: AVCaptureDevice) {
-        guard let previewLayer else {
+        guard let previewHostLayer else {
             pendingCoordinatorDevice = device
             return
         }
-        let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: previewLayer)
+        coordinatorDevice = device
+        let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: previewHostLayer)
         rotationCoordinator = coordinator
-        applyPreviewRotation(coordinator.videoRotationAngleForHorizonLevelPreview)
+        previewRotationAngle = coordinator.videoRotationAngleForHorizonLevelPreview
         rotationObservation = coordinator.observe(\.videoRotationAngleForHorizonLevelPreview, options: [.new]) { [weak self] coordinator, _ in
             let angle = coordinator.videoRotationAngleForHorizonLevelPreview
-            DispatchQueue.main.async { self?.applyPreviewRotation(angle) }
+            DispatchQueue.main.async { self?.previewRotationAngle = angle }
         }
     }
 
-    private func applyPreviewRotation(_ angle: CGFloat) {
-        previewRotationAngle = angle
-        guard let connection = previewLayer?.connection,
-              connection.isVideoRotationAngleSupported(angle) else { return }
-        connection.videoRotationAngle = angle
+    // MARK: - 프레임 미리보기 렌더러
+
+    func addPreviewRenderer(_ renderer: AVSampleBufferVideoRenderer) {
+        rendererLock.lock()
+        previewRenderers[ObjectIdentifier(renderer)] = renderer
+        rendererLock.unlock()
+    }
+
+    func removePreviewRenderer(_ renderer: AVSampleBufferVideoRenderer) {
+        rendererLock.lock()
+        previewRenderers[ObjectIdentifier(renderer)] = nil
+        rendererLock.unlock()
+    }
+
+    /// 미리보기 렌더러들에 프레임 전달 (videoQueue)
+    private func sendToPreviews(_ sampleBuffer: CMSampleBuffer) {
+        rendererLock.lock()
+        let renderers = Array(previewRenderers.values)
+        rendererLock.unlock()
+        guard !renderers.isEmpty else { return }
+        CameraController.markDisplayImmediately(sampleBuffer)
+        for renderer in renderers {
+            if renderer.status == .failed { renderer.flush() }
+            guard renderer.isReadyForMoreMediaData else { continue }
+            renderer.enqueue(sampleBuffer)
+        }
+    }
+
+    /// 실시간 미리보기: 타임스탬프를 기다리지 않고 바로 표시
+    private static func markDisplayImmediately(_ sampleBuffer: CMSampleBuffer) {
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: true),
+              CFArrayGetCount(attachments) > 0 else { return }
+        let dictionary = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
+        CFDictionarySetValue(
+            dictionary,
+            Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+            Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
+        )
     }
 
     // MARK: - Session configuration
@@ -295,17 +347,14 @@ final class CameraController: NSObject, ObservableObject {
             }
         }
 
-        if selectedEngine == .videoFrame {
-            guard session.canAddOutput(videoOutput) else {
-                session.commitConfiguration()
-                publish { $0.status = .unavailable("비디오 출력을 구성할 수 없습니다.") }
-                return false
-            }
-            session.addOutput(videoOutput)
-            session.automaticallyConfiguresCaptureDeviceForWideColor = false
-        } else {
-            session.automaticallyConfiguresCaptureDeviceForWideColor = true
+        // 비디오 데이터 출력: 두 엔진 모두 미리보기의 원본, 프레임 엔진에서는 사진의 원본
+        guard session.canAddOutput(videoOutput) else {
+            session.commitConfiguration()
+            publish { $0.status = .unavailable("비디오 출력을 구성할 수 없습니다.") }
+            return false
         }
+        session.addOutput(videoOutput)
+        session.automaticallyConfiguresCaptureDeviceForWideColor = selectedEngine == .photoPipeline
 
         // 2) 기기 설정 (프레임 엔진은 스트림 해상도가 가장 큰 포맷을 직접 지정)
         do {
@@ -334,8 +383,8 @@ final class CameraController: NSObject, ObservableObject {
         // 카메라 제어 버튼(iPhone 16 이상)에 시스템 줌/노출 슬라이더 연결
         configureSystemControls(for: device)
 
-        // 3) 출력 설정 (프레임 엔진. 사진 엔진은 프리셋이 확정된 뒤 아래에서 설정)
-        if selectedEngine == .videoFrame {
+        // 3) 비디오 출력 설정 (사진 출력은 프리셋이 확정된 뒤 아래에서 설정)
+        do {
             let fullRange = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
             if videoOutput.availableVideoPixelFormatTypes.contains(fullRange) {
                 videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: fullRange]
@@ -396,7 +445,18 @@ final class CameraController: NSObject, ObservableObject {
         }
         observe(device)
         applyDynamicAspectRatio(to: device)
-        videoQueue.async { self.lastFrameSize = .zero }
+        let isFrameEngine = selectedEngine == .videoFrame
+        videoQueue.async {
+            self.lastFrameSize = .zero
+            self.frameEngineOnVideoQueue = isFrameEngine
+            self.awaitingFirstFrame = true
+        }
+        let connectionAngle = videoOutput.connection(with: .video)?.videoRotationAngle ?? 0
+        let diagnostics = CameraController.diagnostics(for: device, engine: selectedEngine, connectionAngle: connectionAngle)
+        // 새 카메라 프레임이 오지 않는 경우를 대비해 전환 가림막은 잠시 후 자동 해제
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.isSwitchingCamera = false
+        }
 
         let torchAvailable = device.hasTorch && device.isTorchAvailable
         let label = CameraController.label(for: device)
@@ -415,7 +475,8 @@ final class CameraController: NSObject, ObservableObject {
             controller.torchAvailable = torchAvailable
             controller.torchOn = false
             controller.cameraLabel = label
-            controller.isSwitchingCamera = false
+            controller.videoConnectionAngle = connectionAngle
+            controller.diagnostics = diagnostics
             controller.setupRotationCoordinator(for: device)
         }
         return true
@@ -557,10 +618,14 @@ final class CameraController: NSObject, ObservableObject {
             controlsDelegateInstalled = true
         }
         session.controls.forEach { session.removeControl($0) }
-        let controls: [AVCaptureControl] = [
-            AVCaptureSystemZoomSlider(device: device),
-            AVCaptureSystemExposureBiasSlider(device: device),
-        ]
+        var controls: [AVCaptureControl] = []
+        // 줌이 안 되는 카메라(예: 화면 아래 카메라)에 슬라이더를 만들면 예외가 나므로 확인 후 추가
+        if device.maxAvailableVideoZoomFactor > device.minAvailableVideoZoomFactor + 0.01 {
+            controls.append(AVCaptureSystemZoomSlider(device: device))
+        }
+        if device.maxExposureTargetBias > device.minExposureTargetBias {
+            controls.append(AVCaptureSystemExposureBiasSlider(device: device))
+        }
         for control in controls where session.canAddControl(control) {
             session.addControl(control)
         }
@@ -868,6 +933,24 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
+    private static func diagnostics(for device: AVCaptureDevice, engine: Engine, connectionAngle: CGFloat) -> [String] {
+        let format = FormatSelector.videoDimensions(of: device.activeFormat)
+        var lines = [
+            "기기: \(DeviceInfo.modelIdentifier) · iOS \(DeviceInfo.systemVersion)",
+            "카메라: \(device.localizedName) (\(device.deviceType.rawValue))",
+            "엔진: \(engine.title)",
+            "포맷: \(format.width)×\(format.height)",
+            "출력 회전: \(Int(connectionAngle))°",
+        ]
+        if #available(iOS 26.0, *) {
+            let supported = device.activeFormat.supportedDynamicAspectRatios.map { $0.rawValue }
+            if !supported.isEmpty {
+                lines.append("동적 비율: \(device.dynamicAspectRatio?.rawValue ?? "-") / 지원 \(supported.joined(separator: ", "))")
+            }
+        }
+        return lines
+    }
+
     static func normalizedAngle(_ angle: CGFloat) -> CGFloat {
         var result = angle.truncatingRemainder(dividingBy: 360)
         if result < 0 { result += 360 }
@@ -892,13 +975,24 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
-        // 실제로 들어오는 프레임 크기를 해상도 표시에 반영 (기기·포맷마다 다를 수 있음)
+        sendToPreviews(sampleBuffer)
+
+        if awaitingFirstFrame {
+            awaitingFirstFrame = false
+            publish { $0.isSwitchingCamera = false }
+        }
+
+        // 실제로 들어오는 프레임 크기 (미리보기 좌표 변환, 프레임 엔진의 저장 해상도 표시)
         if let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
             let size = CGSize(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer))
             if size != lastFrameSize {
                 lastFrameSize = size
+                let isFrameEngine = frameEngineOnVideoQueue
                 let dimensions = CMVideoDimensions(width: Int32(size.width), height: Int32(size.height))
-                publish { $0.outputDimensions = dimensions }
+                publish { controller in
+                    controller.previewFrameSize = size
+                    if isFrameEngine { controller.outputDimensions = dimensions }
+                }
             }
         }
 

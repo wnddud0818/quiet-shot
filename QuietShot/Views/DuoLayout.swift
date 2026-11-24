@@ -103,9 +103,11 @@ struct OuterDisplayPreview: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            MirrorPreview(
-                session: camera.session,
-                rotationAngle: camera.previewRotationAngle,
+            // 세션에 미리보기 레이어를 더 붙이지 않고, 본 화면과 같은 프레임을 그대로 받아 그림
+            // (후면 카메라는 찍히는 사람이 거울처럼 볼 수 있게 좌우 반전)
+            OuterFramePreview(
+                camera: camera,
+                rotationAngle: camera.previewDisplayAngle,
                 mirrored: camera.position == .back
             )
             .ignoresSafeArea()
@@ -132,37 +134,6 @@ struct OuterDisplayPreview: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 withAnimation(.easeOut(duration: 0.25)) { flashOpacity = 0 }
             }
-        }
-    }
-}
-
-/// 같은 캡처 세션의 두 번째 미리보기 레이어
-struct MirrorPreview: UIViewRepresentable {
-    let session: AVCaptureSession
-    let rotationAngle: CGFloat
-    let mirrored: Bool
-
-    func makeUIView(context: Context) -> PreviewView {
-        let view = PreviewView()
-        view.backgroundColor = .black
-        view.previewLayer.session = session
-        view.previewLayer.videoGravity = .resizeAspectFill
-        apply(to: view)
-        return view
-    }
-
-    func updateUIView(_ uiView: PreviewView, context: Context) {
-        apply(to: uiView)
-    }
-
-    private func apply(to view: PreviewView) {
-        guard let connection = view.previewLayer.connection else { return }
-        if connection.isVideoRotationAngleSupported(rotationAngle) {
-            connection.videoRotationAngle = rotationAngle
-        }
-        if connection.isVideoMirroringSupported {
-            connection.automaticallyAdjustsVideoMirroring = false
-            connection.isVideoMirrored = mirrored
         }
     }
 }

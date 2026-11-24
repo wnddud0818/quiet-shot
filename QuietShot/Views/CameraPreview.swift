@@ -3,36 +3,6 @@ import AVKit
 import SwiftUI
 import UIKit
 
-final class PreviewView: UIView {
-    override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
-
-    var previewLayer: AVCaptureVideoPreviewLayer {
-        // layerClass를 지정했으므로 항상 성공
-        layer as! AVCaptureVideoPreviewLayer
-    }
-
-    /// 인터페이스 방향 변화 (iPhone Duo 안쪽 화면처럼 앱 화면이 가로로 돌아가는 경우 대응)
-    var onInterfaceOrientationChange: ((UIInterfaceOrientation) -> Void)?
-    private var lastOrientation: UIInterfaceOrientation = .unknown
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        reportInterfaceOrientation()
-    }
-
-    override func didMoveToWindow() {
-        super.didMoveToWindow()
-        reportInterfaceOrientation()
-    }
-
-    private func reportInterfaceOrientation() {
-        guard let orientation = window?.windowScene?.effectiveGeometry.interfaceOrientation,
-              orientation != lastOrientation else { return }
-        lastOrientation = orientation
-        onInterfaceOrientationChange?(orientation)
-    }
-}
-
 /// 볼륨 버튼 / 카메라 제어 버튼 / AirPods 셔터 이벤트 단계
 enum HardwareShutterPhase {
     case began
@@ -40,29 +10,28 @@ enum HardwareShutterPhase {
     case cancelled
 }
 
-/// AVCaptureVideoPreviewLayer + 카메라 제스처.
+/// 본 화면 카메라 미리보기 (프레임을 직접 그리는 FramePreviewView) + 카메라 제스처.
 /// - 탭: 초점/노출, 길게 누르기: AE/AF 잠금, 두 손가락 핀치: 줌, 한 손가락 위아래 드래그: 노출 또는 빠른 설정
 /// - 볼륨 버튼·카메라 제어 버튼: 셔터 (iOS 17.2+)
 /// - iPhone Duo: 사용자 쪽을 향한 전면 카메라 추적 (iOS 27.1+)
 struct CameraPreview: UIViewRepresentable {
-    let session: AVCaptureSession
-    let onLayerReady: (AVCaptureVideoPreviewLayer) -> Void
-    let onTap: (_ layerPoint: CGPoint, _ devicePoint: CGPoint) -> Void
-    let onLongPress: (_ layerPoint: CGPoint, _ devicePoint: CGPoint) -> Void
+    let camera: CameraController
+    let rotationAngle: CGFloat
+    let mirrored: Bool
+    let bufferSize: CGSize
+    let connectionAngle: CGFloat
+    let onTap: (_ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void
+    let onLongPress: (_ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void
     let onPinch: (_ state: UIGestureRecognizer.State, _ scale: CGFloat) -> Void
     let onPan: (_ state: UIGestureRecognizer.State, _ translation: CGSize) -> Void
     let onHardwareShutter: (HardwareShutterPhase) -> Void
     let onForwardFacingCamerasChange: ([String]) -> Void
     let onInterfaceOrientationChange: (UIInterfaceOrientation) -> Void
 
-    func makeUIView(context: Context) -> PreviewView {
-        let view = PreviewView()
-        view.backgroundColor = .black
-        view.previewLayer.session = session
-        // 선택한 비율의 프레임을 꽉 채움 = 저장되는 중앙 크롭 영역과 동일
-        view.previewLayer.videoGravity = .resizeAspectFill
-
+    func makeUIView(context: Context) -> FramePreviewView {
+        let view = FramePreviewView()
         let coordinator = context.coordinator
+
         let tap = UITapGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleTap(_:)))
         let longPress = UILongPressGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleLongPress(_:)))
         longPress.minimumPressDuration = 0.5
@@ -78,12 +47,32 @@ struct CameraPreview: UIViewRepresentable {
         coordinator.installHardwareShutter(on: view)
         coordinator.installDirectionCoordinator(on: view)
 
-        onLayerReady(view.previewLayer)
+        // 프레임 받기 시작 + 회전 기준 등록
+        let renderer = view.displayLayer.sampleBufferRenderer
+        coordinator.renderer = renderer
+        camera.addPreviewRenderer(renderer)
+        camera.attach(previewView: view)
+
+        apply(to: view)
         return view
     }
 
-    func updateUIView(_ uiView: PreviewView, context: Context) {
+    func updateUIView(_ uiView: FramePreviewView, context: Context) {
         context.coordinator.parent = self
+        apply(to: uiView)
+    }
+
+    static func dismantleUIView(_ uiView: FramePreviewView, coordinator: Coordinator) {
+        if let renderer = coordinator.renderer {
+            coordinator.parent.camera.removePreviewRenderer(renderer)
+        }
+    }
+
+    private func apply(to view: FramePreviewView) {
+        view.rotationAngle = rotationAngle
+        view.mirrored = mirrored
+        view.bufferSize = bufferSize
+        view.connectionAngle = connectionAngle
     }
 
     func makeCoordinator() -> Coordinator {
@@ -93,6 +82,7 @@ struct CameraPreview: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject {
         var parent: CameraPreview
+        var renderer: AVSampleBufferVideoRenderer?
         private var eventInteraction: UIInteraction?
         private var directionCoordinator: AnyObject?
 
@@ -103,15 +93,15 @@ struct CameraPreview: UIViewRepresentable {
         // MARK: 제스처
 
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
-            guard let view = recognizer.view as? PreviewView else { return }
+            guard let view = recognizer.view as? FramePreviewView else { return }
             let point = recognizer.location(in: view)
-            parent.onTap(point, view.previewLayer.captureDevicePointConverted(fromLayerPoint: point))
+            parent.onTap(point, view.devicePoint(for: point))
         }
 
         @objc func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
-            guard recognizer.state == .began, let view = recognizer.view as? PreviewView else { return }
+            guard recognizer.state == .began, let view = recognizer.view as? FramePreviewView else { return }
             let point = recognizer.location(in: view)
-            parent.onLongPress(point, view.previewLayer.captureDevicePointConverted(fromLayerPoint: point))
+            parent.onLongPress(point, view.devicePoint(for: point))
         }
 
         @objc func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
