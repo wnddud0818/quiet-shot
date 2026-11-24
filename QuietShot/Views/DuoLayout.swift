@@ -1,0 +1,168 @@
+import AVFoundation
+import SwiftUI
+import UIKit
+
+// iPhone Duo(폴더블) 전용 화면 구성 요소.
+// 접힘 상태·접는 선·안쪽 화면 카메라 구멍·바깥 화면 액세서리 API는 iOS 27.1 SDK(Xcode 27.1+)에만 있으므로
+// DuoSupport.swift와 같은 조건으로 컴파일하고, 실행 시에도 #available(iOS 27.1, *)로 확인합니다.
+
+/// 접는 선(division)과 안쪽 화면 카메라(occlusion) 위치
+struct DuoRegions: Equatable {
+    /// 반쯤 접혔을 때의 접는 선 영역 (평평하게 펴져 있으면 nil)
+    var fold: CGRect?
+    /// 켜져 있는 화면 아래 카메라 영역 (UI를 피해서 배치)
+    var occlusions: [CGRect] = []
+
+    static let none = DuoRegions(fold: nil, occlusions: [])
+
+    static func read(_ proxy: GeometryProxy) -> DuoRegions {
+        #if canImport(AVKit.AVCaptureDeviceDirectionCoordinator)
+        if #available(iOS 27.1, *) {
+            let fold = proxy.reservedRegions(kind: .division)
+                .first(where: { $0.isActive && $0.frame.width > 0 && $0.frame.height > 0 })?
+                .frame
+            let occlusions = proxy.reservedRegions(kind: .occlusion)
+                .filter { $0.isActive }
+                .map { $0.frame }
+            return DuoRegions(fold: fold, occlusions: occlusions)
+        }
+        #endif
+        return .none
+    }
+
+    /// 카메라 구멍과 겹치지 않도록 화면 가장자리에서 띄울 여백
+    func occlusionInsets(in size: CGSize) -> EdgeInsets {
+        var insets = EdgeInsets()
+        for frame in occlusions where !frame.isEmpty {
+            if frame.midY < size.height * 0.3 {
+                insets.top = max(insets.top, frame.maxY + 6)
+            } else if frame.midY > size.height * 0.7 {
+                insets.bottom = max(insets.bottom, size.height - frame.minY + 6)
+            } else if frame.midX < size.width * 0.3 {
+                insets.leading = max(insets.leading, frame.maxX + 6)
+            } else if frame.midX > size.width * 0.7 {
+                insets.trailing = max(insets.trailing, size.width - frame.minX + 6)
+            }
+        }
+        return insets
+    }
+}
+
+/// 힌지(접힘) 상태 관찰
+struct DuoHingeObserver: ViewModifier {
+    @Binding var isPartiallyOpen: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        #if canImport(AVKit.AVCaptureDeviceDirectionCoordinator)
+        if #available(iOS 27.1, *) {
+            content.onHingeChange { _, context in
+                isPartiallyOpen = context.hinge?.status == .partiallyOpen
+            }
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
+    }
+}
+
+/// 펼쳐서 촬영할 때 바깥 화면에 실시간 미리보기 (찍히는 사람이 자기 모습을 볼 수 있게)
+struct OuterDisplayAccessory: ViewModifier {
+    @ObservedObject var camera: CameraController
+    @Binding var isEnabled: Bool
+    @Binding var isAvailable: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        #if canImport(AVKit.AVCaptureDeviceDirectionCoordinator)
+        if #available(iOS 27.1, *) {
+            content.sceneAccessory {
+                CameraCaptureAccessory(isEnabled: $isEnabled) {
+                    OuterDisplayPreview(camera: camera)
+                }
+                .onAvailabilityChange { available in
+                    isAvailable = available
+                }
+            }
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
+    }
+}
+
+/// 바깥 화면에 보이는 내용: 미리보기(후면 카메라는 거울처럼 좌우 반전) + 카운트다운 + 촬영 깜빡임
+struct OuterDisplayPreview: View {
+    @ObservedObject var camera: CameraController
+    @State private var flashOpacity: Double = 0
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            MirrorPreview(
+                session: camera.session,
+                rotationAngle: camera.previewRotationAngle,
+                mirrored: camera.position == .back
+            )
+            .ignoresSafeArea()
+            if let countdown = camera.countdown {
+                Text("\(countdown)")
+                    .font(.system(size: 160, weight: .thin, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.5), radius: 14)
+            }
+            Color.white.opacity(flashOpacity).ignoresSafeArea()
+            VStack {
+                Spacer()
+                Label("QuietShot", systemImage: "speaker.slash.fill")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(Color.black.opacity(0.5)))
+                    .padding(.bottom, 18)
+            }
+        }
+        .onChange(of: camera.captureTick) { _, _ in
+            flashOpacity = 0.6
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                withAnimation(.easeOut(duration: 0.25)) { flashOpacity = 0 }
+            }
+        }
+    }
+}
+
+/// 같은 캡처 세션의 두 번째 미리보기 레이어
+struct MirrorPreview: UIViewRepresentable {
+    let session: AVCaptureSession
+    let rotationAngle: CGFloat
+    let mirrored: Bool
+
+    func makeUIView(context: Context) -> PreviewView {
+        let view = PreviewView()
+        view.backgroundColor = .black
+        view.previewLayer.session = session
+        view.previewLayer.videoGravity = .resizeAspectFill
+        apply(to: view)
+        return view
+    }
+
+    func updateUIView(_ uiView: PreviewView, context: Context) {
+        apply(to: uiView)
+    }
+
+    private func apply(to view: PreviewView) {
+        guard let connection = view.previewLayer.connection else { return }
+        if connection.isVideoRotationAngleSupported(rotationAngle) {
+            connection.videoRotationAngle = rotationAngle
+        }
+        if connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = mirrored
+        }
+    }
+}
