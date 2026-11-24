@@ -1,0 +1,74 @@
+import SwiftUI
+
+struct SettingsView: View {
+    @ObservedObject var camera: CameraController
+    @Environment(\.dismiss) private var dismiss
+
+    @AppStorage(SettingsKey.saveFormat) private var saveFormat: SaveFormat = .heic
+    @AppStorage(SettingsKey.mirrorFrontCamera) private var mirrorFrontCamera = false
+    @AppStorage(SettingsKey.showGrid) private var showGrid = false
+    @AppStorage(SettingsKey.hapticOnCapture) private var hapticOnCapture = false
+    @AppStorage(SettingsKey.forceFrameEngine) private var forceFrameEngine = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    LabeledContent("저장 해상도", value: camera.resolutionText)
+                    LabeledContent("캡처 방식", value: camera.engine.title)
+                    LabeledContent("셔터음", value: "없음 (무음)")
+                    Text(engineExplanation)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } header: {
+                    Text("현재 카메라")
+                }
+
+                Section {
+                    Picker("파일 형식", selection: $saveFormat) {
+                        ForEach(SaveFormat.allCases) { format in
+                            Text(format.title).tag(format)
+                        }
+                    }
+                    Toggle("전면 카메라 좌우 반전 저장", isOn: $mirrorFrontCamera)
+                } header: {
+                    Text("저장")
+                }
+
+                Section {
+                    Toggle("격자 표시", isOn: $showGrid)
+                    Toggle("촬영 시 진동", isOn: $hapticOnCapture)
+                    if camera.shutterSuppressionSupported {
+                        Toggle("항상 프레임 캡처 사용", isOn: $forceFrameEngine)
+                            .onChange(of: forceFrameEngine) { _, _ in
+                                camera.reconfigure()
+                            }
+                    }
+                } header: {
+                    Text("촬영")
+                } footer: {
+                    Text("셔터 버튼을 길게 누르면 손을 뗄 때까지 연속 촬영합니다. 촬영 시 진동은 조용한 곳에서 들릴 수 있어 기본으로 꺼져 있습니다.")
+                }
+            }
+            .navigationTitle("설정")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("완료") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private var engineExplanation: String {
+        switch camera.engine {
+        case .photoPipeline:
+            return "이 기기는 iOS의 셔터음 억제 기능이 허용되어, 정식 사진 처리(Deep Fusion·Smart HDR)를 거친 센서 최대 해상도 사진을 무음으로 촬영합니다."
+        case .videoFrame:
+            if camera.shutterSuppressionSupported {
+                return "설정에 따라 카메라 영상 스트림의 프레임을 그대로 저장합니다. 사진 촬영 API를 쓰지 않으므로 셔터음이 원천적으로 발생하지 않습니다."
+            }
+            return "이 기기는 시스템 셔터음이 강제되는 기기(한국·일본 판매 모델 등)이거나 iOS 17이므로, 카메라 영상 스트림의 프레임을 그대로 저장합니다. 사진 촬영 API를 쓰지 않아 지역과 관계없이 셔터음이 발생하지 않으며, 기기가 영상 스트림으로 제공하는 최대 해상도로 저장됩니다."
+        }
+    }
+}
