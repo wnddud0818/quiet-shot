@@ -6,20 +6,18 @@ jobs:
   probe:
     runs-on: xcode-27
     steps:
-      - name: Print iPhone Duo UI headers
+      - name: Print SwiftUI Duo API signatures
         run: |
           XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
           sudo xcode-select -s "$XCODE" >/dev/null
           F="$(xcrun --sdk iphoneos --show-sdk-path)/System/Library/Frameworks"
-          show() { echo "######## $1 [$2]"; sed -n "$2p" "$F/$1" | grep -v '^\s*$' | grep -v '^\s*///\s*$' | cut -c1-210; }
-          show UIKit.framework/Headers/UIViewReservedRegion.h 1,90
-          show UIKit.framework/Headers/UIView.h 755,775
-          show UIKit.framework/Headers/UISceneAccessory.h 1,85
-          show UIKit.framework/Headers/UISceneAccessoryRegistration.h 1,60
-          show UIKit.framework/Headers/UIViewController.h 355,375
-          echo "######## AVCaptureVideoPreviewLayer new API"
-          grep -n -B3 -E "ios\(2[67]" "$F/AVFoundation.framework/Headers/AVCaptureVideoPreviewLayer.h" | cut -c1-210 | head -40
-          echo "######## SwiftUI swiftinterface"
-          SI=$(find "$F/SwiftUI.framework" "$F/SwiftUICore.framework" -name "arm64e-apple-ios.swiftinterface" 2>/dev/null)
-          echo "$SI"
-          grep -h -n -E "ReservedRegion|reservedRegions|struct Hinge|hingeState|HingeStatus|ArrangementView" $SI | cut -c1-230 | head -60
+          CORE="$F/SwiftUICore.framework/Modules/SwiftUICore.swiftmodule/arm64e-apple-ios.swiftinterface"
+          echo "######## ReservedRegion struct"; sed -n '4850,4912p' "$CORE" | grep -v '^\s*$' | cut -c1-200
+          echo "######## reservedRegions owners"; sed -n '10325,10370p' "$CORE" | grep -E "extension|reservedRegions|available" | cut -c1-200
+          echo "######## files mentioning CameraCaptureAccessory / onHingeChange"
+          FILES=$(find "$F" -name "arm64e-apple-ios.swiftinterface" 2>/dev/null)
+          grep -l -E "CameraCaptureAccessory|onHingeChange|func sceneAccessory" $FILES
+          for f in $(grep -l -E "CameraCaptureAccessory|onHingeChange|func sceneAccessory" $FILES); do
+            echo "--- $f"
+            grep -n -B2 -A3 -E "struct CameraCaptureAccessory|public init\(.*isEnabled|func onAvailabilityChange|func onHingeChange|func sceneAccessory|struct HingeContext|struct Hinge |struct Hinge:|enum Status|var hinge|var status|var angle" "$f" | grep -v "^--$" | cut -c1-230 | head -80
+          done
