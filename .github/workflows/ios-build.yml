@@ -27,6 +27,7 @@ jobs:
             sudo xcode-select -s "$XCODE"
           fi
           xcodebuild -version
+          xcrun swift --version
           xcodebuild -showsdks | grep -i ios
 
       - name: Build (unsigned)
@@ -58,6 +59,7 @@ jobs:
           XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
           if [ -n "$XCODE" ]; then sudo xcode-select -s "$XCODE"; fi
           xcodebuild -version
+          xcrun swift --version
 
       - name: Archive (unsigned)
         run: |

@@ -42,10 +42,15 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var engine: Engine = .videoFrame
     @Published private(set) var outputDimensions = CMVideoDimensions(width: 0, height: 0)
     @Published private(set) var position: AVCaptureDevice.Position = .back
-    @Published private(set) var lenses: [LensOption] = []
-    @Published private(set) var activeLensID: String?
-    @Published private(set) var lensMultiplier: CGFloat = 1
+    @Published private(set) var zoom: ZoomConfiguration = .single
     @Published private(set) var zoomFactor: CGFloat = 1
+    @Published private(set) var exposureBias: Float = 0
+    @Published private(set) var isFocusLocked = false
+    @Published private(set) var isSwitchingCamera = false
+    /// Camera Control(카메라 제어 버튼) 슬라이더가 전체 화면 오버레이로 떠 있는 동안 true
+    @Published private(set) var isSystemControlFullscreen = false
+    /// 예) "후면", "전면", "전면 · 바깥 화면" (iPhone Duo)
+    @Published private(set) var cameraLabel = ""
     @Published private(set) var torchAvailable = false
     @Published private(set) var torchOn = false
     @Published private(set) var thumbnail: UIImage?
@@ -56,7 +61,10 @@ final class CameraController: NSObject, ObservableObject {
     @Published var toast: String?
 
     /// 광각 기준 표시 배율 (예: 0.5×, 1×, 2.3×, 5×)
-    var displayZoom: CGFloat { lensMultiplier * zoomFactor }
+    var displayZoom: CGFloat { zoom.display(for: zoomFactor) }
+
+    /// 기기를 가로로 들고 있는지 (정사각형 센서 프레임을 가로/세로 중 어느 쪽으로 자를지 결정)
+    var deviceIsLandscape = false
 
     /// 선택한 촬영 비율로 크롭한 뒤 실제 저장되는 크기
     func savedDimensions(for aspect: AspectRatioOption) -> (width: Int, height: Int) {
@@ -87,8 +95,14 @@ final class CameraController: NSObject, ObservableObject {
     private var videoInput: AVCaptureDeviceInput?
     private var activeEngine: Engine = .videoFrame
     private var isConfigured = false
-    private var cachedBackLenses: [LensOption]?
     private var notificationTokens: [NSObjectProtocol] = []
+    private var zoomOnQueue: ZoomConfiguration = .single
+    private var deviceObservations: [NSKeyValueObservation] = []
+    /// iPhone Duo: 지금 앱이 떠 있는 화면 쪽(사용자 쪽)을 향한 카메라들 (DirectionCoordinator 제공)
+    private var forwardFacingCameraIDs: [String] = []
+    private var controlsDelegateInstalled = false
+    /// videoQueue 전용: 마지막으로 받은 프레임 크기
+    private var lastFrameSize = CGSize.zero
 
     // MARK: - 메인 스레드 전용
 
@@ -110,6 +124,7 @@ final class CameraController: NSObject, ObservableObject {
         let location: CLLocation?
         let heading: CLHeading?
         let aspect: AspectRatioOption
+        let preferLandscape: Bool
     }
 
     private let frameLock = NSLock()
@@ -127,6 +142,10 @@ final class CameraController: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        // Center Stage 자동 프레이밍이 줌을 임의로 바꾸지 않도록 앱이 직접 제어
+        AVCaptureDevice.centerStageControlMode = .app
+        AVCaptureDevice.isCenterStageEnabled = false
+
         let center = NotificationCenter.default
         notificationTokens.append(
             center.addObserver(forName: .AVCaptureSessionRuntimeError, object: session, queue: nil) { [weak self] _ in
@@ -140,7 +159,7 @@ final class CameraController: NSObject, ObservableObject {
         )
         notificationTokens.append(
             center.addObserver(forName: .AVCaptureDeviceSubjectAreaDidChange, object: nil, queue: nil) { [weak self] _ in
-                self?.resetFocusToContinuous()
+                self?.unlockFocus()
             }
         )
     }
@@ -216,7 +235,7 @@ final class CameraController: NSObject, ObservableObject {
 
     private func configureIfNeededAndRun() {
         if !isConfigured {
-            guard let device = CameraController.defaultBackDevice() ?? CameraController.frontDevice() else {
+            guard let device = CameraController.backDevice() ?? resolveFrontDevice() else {
                 publish { $0.status = .unavailable("사용 가능한 카메라가 없습니다.\n시뮬레이터가 아닌 실제 iPhone에서 실행해 주세요.") }
                 return
             }
@@ -298,11 +317,16 @@ final class CameraController: NSObject, ObservableObject {
                 device.automaticallyEnablesLowLightBoostWhenAvailable = true
             }
             device.isSubjectAreaChangeMonitoringEnabled = false
-            device.videoZoomFactor = 1
+            if selectedEngine == .videoFrame {
+                CameraController.preferSquareDynamicAspectRatio(device)
+            }
             device.unlockForConfiguration()
         } catch {
             // 잠금 실패 시 세션 기본 포맷으로 동작
         }
+
+        // 카메라 제어 버튼(iPhone 16 이상)에 시스템 줌/노출 슬라이더 연결
+        configureSystemControls(for: device)
 
         // 3) 출력 설정 (프레임 엔진. 사진 엔진은 프리셋이 확정된 뒤 아래에서 설정)
         if selectedEngine == .videoFrame {
@@ -341,6 +365,10 @@ final class CameraController: NSObject, ObservableObject {
             if photoOutput.isFastCapturePrioritizationSupported {
                 photoOutput.isFastCapturePrioritizationEnabled = true
             }
+            // 세로로 장착된 정사각형 전면 센서(iPhone 17/Duo): RotationCoordinator 각도를 쓰므로 보정은 끔
+            if #available(iOS 26.0, *), photoOutput.isCameraSensorOrientationCompensationSupported {
+                photoOutput.isCameraSensorOrientationCompensationEnabled = false
+            }
             session.commitConfiguration()
             preparePhotoPipeline()
         }
@@ -349,27 +377,38 @@ final class CameraController: NSObject, ObservableObject {
             ? photoOutput.maxPhotoDimensions
             : FormatSelector.videoDimensions(of: device.activeFormat)
 
-        var lenses: [LensOption] = []
-        if device.position == .back {
-            if cachedBackLenses == nil {
-                cachedBackLenses = LensOption.discoverBackLenses()
-            }
-            lenses = cachedBackLenses ?? []
+        // 줌: 후면은 1×(광각), 전면은 마지막으로 고른 넓게/표준
+        let zoomConfig = ZoomConfiguration.make(for: device)
+        zoomOnQueue = zoomConfig
+        var initialZoom = zoomConfig.defaultFactor
+        if device.position == .front, UserDefaults.standard.bool(forKey: SettingsKey.frontWideFraming) {
+            initialZoom = zoomConfig.minFactor
         }
-        let multiplier = lenses.first(where: { $0.id == device.uniqueID })?.multiplier ?? 1
+        if (try? device.lockForConfiguration()) != nil {
+            device.videoZoomFactor = min(max(initialZoom, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
+            device.unlockForConfiguration()
+        }
+        observe(device)
+        videoQueue.async { self.lastFrameSize = .zero }
+
         let torchAvailable = device.hasTorch && device.isTorchAvailable
+        let label = CameraController.label(for: device)
+        let zoomNow = device.videoZoomFactor
+        let biasNow = device.exposureTargetBias
 
         publish { controller in
             controller.engine = selectedEngine
             controller.shutterSuppressionSupported = suppressionSupported
             controller.outputDimensions = dimensions
             controller.position = device.position
-            controller.lenses = lenses
-            controller.activeLensID = device.uniqueID
-            controller.lensMultiplier = multiplier
-            controller.zoomFactor = 1
+            controller.zoom = zoomConfig
+            controller.zoomFactor = zoomNow
+            controller.exposureBias = biasNow
+            controller.isFocusLocked = false
             controller.torchAvailable = torchAvailable
             controller.torchOn = false
+            controller.cameraLabel = label
+            controller.isSwitchingCamera = false
             controller.setupRotationCoordinator(for: device)
         }
         return true
@@ -398,103 +437,192 @@ final class CameraController: NSObject, ObservableObject {
 
     // MARK: - Devices
 
-    static func defaultBackDevice() -> AVCaptureDevice? {
-        AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+    /// 후면: 멀티 렌즈 가상 카메라(렌즈 경계 없이 매끄러운 줌) → 없으면 광각
+    static func backDevice() -> AVCaptureDevice? {
+        let types: [AVCaptureDevice.DeviceType] = [.builtInTripleCamera, .builtInDualWideCamera, .builtInDualCamera, .builtInWideAngleCamera]
+        let devices = AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video, position: .back).devices
+        for type in types {
+            if let device = devices.first(where: { $0.deviceType == type }) { return device }
+        }
+        return nil
     }
 
-    static func frontDevice() -> AVCaptureDevice? {
-        AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+    /// 전면 카메라 후보 (우선순위 순)
+    /// - iPhone Duo: 바깥/안쪽 화면 개별 카메라 (가상 전면 카메라는 1080p 제한이라 사용하지 않음)
+    /// - iPhone 17 이후: 정사각형 센서 Center Stage 카메라 (.builtInUltraWideCamera)
+    /// - 그 외: 기존 전면 광각 카메라
+    static func frontCandidates() -> [AVCaptureDevice] {
+        let types: [AVCaptureDevice.DeviceType] = DuoSupport.frontCameraTypes + [.builtInUltraWideCamera, .builtInWideAngleCamera]
+        let devices = AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video, position: .front).devices
+        let duo = devices.filter { DuoSupport.isDuoFrontCamera($0.deviceType) }
+        if !duo.isEmpty { return duo }
+        return types.compactMap { type in devices.first(where: { $0.deviceType == type }) }
     }
 
-    func selectLens(_ lens: LensOption) {
+    /// 사용자 쪽을 향한 전면 카메라 (iPhone Duo는 접힘/펼침에 따라 바깥/안쪽 화면 카메라)
+    private func resolveFrontDevice() -> AVCaptureDevice? {
+        let candidates = CameraController.frontCandidates()
+        if let facing = candidates.first(where: { forwardFacingCameraIDs.contains($0.uniqueID) }) {
+            return facing
+        }
+        return candidates.first
+    }
+
+    static func label(for device: AVCaptureDevice) -> String {
+        guard device.position == .front else { return "후면" }
+        return DuoSupport.label(for: device.deviceType) ?? "전면"
+    }
+
+    /// iPhone Duo: 화면이 접히거나 펼쳐져 사용자를 향한 카메라가 바뀌면 호출 (메인 스레드)
+    func updateForwardFacingCameras(_ ids: [String]) {
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            if self.videoInput?.device.uniqueID == lens.id {
-                self.setZoomOnQueue(1)
-                return
-            }
-            guard let device = AVCaptureDevice(uniqueID: lens.id) else { return }
-            self.configureSession(with: device)
+            self.forwardFacingCameraIDs = ids
+            guard self.isConfigured,
+                  let current = self.videoInput?.device, current.position == .front,
+                  let facing = self.resolveFrontDevice(), facing.uniqueID != current.uniqueID else { return }
+            self.publish { $0.isSwitchingCamera = true }
+            self.configureSession(with: facing)
         }
     }
 
     func switchCamera() {
         stopBurst()
+        isSwitchingCamera = true
         sessionQueue.async { [weak self] in
             guard let self, let current = self.videoInput?.device else { return }
-            let next = current.position == .front
-                ? CameraController.defaultBackDevice()
-                : CameraController.frontDevice()
-            guard let next else { return }
+            let next = current.position == .front ? CameraController.backDevice() : self.resolveFrontDevice()
+            guard let next else {
+                self.publish { $0.isSwitchingCamera = false }
+                return
+            }
             self.configureSession(with: next)
         }
     }
 
-    // MARK: - Zoom / Focus / Torch
+    /// 정사각형 센서(Center Stage 전면 카메라)는 1:1로 받아 촬영 방향에 맞게 직접 자름 (최대 화소)
+    private static func preferSquareDynamicAspectRatio(_ device: AVCaptureDevice) {
+        guard #available(iOS 26.0, *) else { return }
+        let supported = device.activeFormat.supportedDynamicAspectRatios
+        guard supported.contains(.ratio1x1), device.dynamicAspectRatio != .ratio1x1 else { return }
+        device.setDynamicAspectRatio(.ratio1x1, completionHandler: nil)
+    }
 
-    /// 현재 렌즈 기준 배율 (1 = 렌즈 기본 화각)
-    func setZoom(_ factor: CGFloat) {
-        sessionQueue.async { [weak self] in
-            self?.setZoomOnQueue(factor)
+    /// 줌 배율·노출 보정 변화를 UI에 반영 (버튼, 다이얼, 핀치, 카메라 제어 버튼 등 모든 경로)
+    private func observe(_ device: AVCaptureDevice) {
+        deviceObservations = [
+            device.observe(\.videoZoomFactor, options: [.new]) { [weak self] device, _ in
+                let factor = device.videoZoomFactor
+                self?.publish { $0.zoomFactor = factor }
+            },
+            device.observe(\.exposureTargetBias, options: [.new]) { [weak self] device, _ in
+                let bias = device.exposureTargetBias
+                self?.publish { $0.exposureBias = bias }
+            },
+        ]
+    }
+
+    private func configureSystemControls(for device: AVCaptureDevice) {
+        guard #available(iOS 18.0, *), session.supportsControls else { return }
+        if !controlsDelegateInstalled {
+            session.setControlsDelegate(self, queue: sessionQueue)
+            controlsDelegateInstalled = true
+        }
+        session.controls.forEach { session.removeControl($0) }
+        let controls: [AVCaptureControl] = [
+            AVCaptureSystemZoomSlider(device: device),
+            AVCaptureSystemExposureBiasSlider(device: device),
+        ]
+        for control in controls where session.canAddControl(control) {
+            session.addControl(control)
         }
     }
 
-    private func setZoomOnQueue(_ factor: CGFloat) {
-        guard let device = videoInput?.device else { return }
-        let upper = min(device.maxAvailableVideoZoomFactor, 10)
-        let clamped = max(device.minAvailableVideoZoomFactor, min(factor, upper))
-        do {
-            try device.lockForConfiguration()
-            device.videoZoomFactor = clamped
+    // MARK: - Zoom / Focus / Exposure / Torch
+
+    /// videoZoomFactor 기준. animated면 렌즈 전환처럼 부드럽게 램프
+    func setZoom(factor: CGFloat, animated: Bool = false) {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoInput?.device else { return }
+            let config = self.zoomOnQueue
+            let clamped = min(max(factor, config.minFactor), config.maxFactor)
+            guard (try? device.lockForConfiguration()) != nil else { return }
+            if animated {
+                device.ramp(toVideoZoomFactor: clamped, withRate: 6)
+            } else {
+                if device.isRampingVideoZoom { device.cancelVideoZoomRamp() }
+                device.videoZoomFactor = clamped
+            }
             device.unlockForConfiguration()
-        } catch {
-            return
-        }
-        publish { $0.zoomFactor = clamped }
-    }
-
-    /// devicePoint: AVCaptureVideoPreviewLayer.captureDevicePointConverted(fromLayerPoint:) 결과
-    func focus(at devicePoint: CGPoint) {
-        sessionQueue.async { [weak self] in
-            guard let device = self?.videoInput?.device else { return }
-            do {
-                try device.lockForConfiguration()
-                if device.isFocusPointOfInterestSupported, device.isFocusModeSupported(.autoFocus) {
-                    device.focusPointOfInterest = devicePoint
-                    device.focusMode = .autoFocus
-                }
-                if device.isExposurePointOfInterestSupported, device.isExposureModeSupported(.autoExpose) {
-                    device.exposurePointOfInterest = devicePoint
-                    device.exposureMode = .autoExpose
-                }
-                device.isSubjectAreaChangeMonitoringEnabled = true
-                device.unlockForConfiguration()
-            } catch {}
         }
     }
 
-    /// 장면이 바뀌면 중앙 연속 AF/AE로 복귀
-    private func resetFocusToContinuous() {
+    /// 화면 표시 배율 기준 (예: 2.5×)
+    func setZoom(display: CGFloat, animated: Bool = false) {
+        setZoom(factor: zoom.factor(forDisplay: display), animated: animated)
+    }
+
+    func selectZoomPreset(_ preset: ZoomPreset) {
+        if position == .front {
+            UserDefaults.standard.set(preset.factor <= zoom.minFactor + 0.01, forKey: SettingsKey.frontWideFraming)
+        }
+        setZoom(factor: preset.factor, animated: true)
+    }
+
+    /// 탭: 해당 지점에 초점/노출 (장면이 바뀌면 자동 해제)
+    /// 길게 누르기(lock): AE/AF 잠금 (다시 탭할 때까지 유지)
+    func focus(at devicePoint: CGPoint, lock: Bool) {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoInput?.device else { return }
+            guard (try? device.lockForConfiguration()) != nil else { return }
+            if device.isFocusPointOfInterestSupported, device.isFocusModeSupported(.autoFocus) {
+                device.focusPointOfInterest = devicePoint
+                device.focusMode = .autoFocus
+            }
+            if device.isExposurePointOfInterestSupported, device.isExposureModeSupported(.autoExpose) {
+                device.exposurePointOfInterest = devicePoint
+                device.exposureMode = .autoExpose
+            }
+            device.setExposureTargetBias(0, completionHandler: nil)
+            device.isSubjectAreaChangeMonitoringEnabled = !lock
+            device.unlockForConfiguration()
+            self.publish { $0.isFocusLocked = lock }
+        }
+    }
+
+    /// 노출 보정(EV). iPhone 기본 카메라처럼 ±2EV 범위
+    func setExposureBias(_ bias: Float) {
         sessionQueue.async { [weak self] in
             guard let device = self?.videoInput?.device else { return }
+            let lower = max(device.minExposureTargetBias, -2)
+            let upper = min(device.maxExposureTargetBias, 2)
+            guard (try? device.lockForConfiguration()) != nil else { return }
+            device.setExposureTargetBias(min(max(bias, lower), upper), completionHandler: nil)
+            device.unlockForConfiguration()
+        }
+    }
+
+    /// 중앙 연속 AF/AE로 복귀 (AE/AF 잠금 해제)
+    func unlockFocus() {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoInput?.device else { return }
             let center = CGPoint(x: 0.5, y: 0.5)
-            do {
-                try device.lockForConfiguration()
-                if device.isFocusPointOfInterestSupported {
-                    device.focusPointOfInterest = center
-                }
-                if device.isFocusModeSupported(.continuousAutoFocus) {
-                    device.focusMode = .continuousAutoFocus
-                }
-                if device.isExposurePointOfInterestSupported {
-                    device.exposurePointOfInterest = center
-                }
-                if device.isExposureModeSupported(.continuousAutoExposure) {
-                    device.exposureMode = .continuousAutoExposure
-                }
-                device.isSubjectAreaChangeMonitoringEnabled = false
-                device.unlockForConfiguration()
-            } catch {}
+            guard (try? device.lockForConfiguration()) != nil else { return }
+            if device.isFocusPointOfInterestSupported {
+                device.focusPointOfInterest = center
+            }
+            if device.isFocusModeSupported(.continuousAutoFocus) {
+                device.focusMode = .continuousAutoFocus
+            }
+            if device.isExposurePointOfInterestSupported {
+                device.exposurePointOfInterest = center
+            }
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+            device.isSubjectAreaChangeMonitoringEnabled = false
+            device.unlockForConfiguration()
+            self.publish { $0.isFocusLocked = false }
         }
     }
 
@@ -549,6 +677,7 @@ final class CameraController: NSObject, ObservableObject {
         let angle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? 90
         let options = CaptureOptions.current()
         let place = options.saveLocation ? LocationProvider.shared.snapshot() : .empty
+        let landscape = deviceIsLandscape
         if isBurst { burstCount += 1 }
         captureTick += 1
 
@@ -572,7 +701,7 @@ final class CameraController: NSObject, ObservableObject {
                 let request = FrameRequest(rotationAngle: angle, mirrored: mirrored, format: options.saveFormat,
                                            colorSpace: colorSpace, wideColor: wideColor, position: device.position,
                                            location: place.location, heading: place.heading,
-                                           aspect: options.aspectRatio)
+                                           aspect: options.aspectRatio, preferLandscape: landscape)
                 self.frameLock.lock()
                 self.pendingFrameRequests.append(request)
                 self.frameLock.unlock()
@@ -735,6 +864,16 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
+        // 실제로 들어오는 프레임 크기를 해상도 표시에 반영 (기기·포맷마다 다를 수 있음)
+        if let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+            let size = CGSize(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer))
+            if size != lastFrameSize {
+                lastFrameSize = size
+                let dimensions = CMVideoDimensions(width: Int32(size.width), height: Int32(size.height))
+                publish { $0.outputDimensions = dimensions }
+            }
+        }
+
         frameLock.lock()
         let request = pendingFrameRequests.isEmpty ? nil : pendingFrameRequests.removeFirst()
         frameLock.unlock()
@@ -765,7 +904,7 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
             image = image.oriented(.upMirrored)
         }
         // 촬영 비율로 중앙 크롭 (미리보기와 동일한 영역)
-        image = image.cropped(to: request.aspect.centeredCropRect(in: image.extent))
+        image = image.cropped(to: request.aspect.centeredCropRect(in: image.extent, squarePrefersLandscape: request.preferLandscape))
 
         // 버퍼를 오래 붙잡지 않도록 여기서 바로 렌더링 후 해제
         guard let cgImage = ciContext.createCGImage(image, from: image.extent, format: .RGBA8, colorSpace: request.colorSpace) else {
@@ -791,5 +930,24 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
             self.saveToLibrary(encoded.data, format: encoded.format, thumbnail: thumbnail,
                                location: request.location, date: context.date)
         }
+    }
+}
+
+// MARK: - 카메라 제어 버튼 (iOS 18+)
+
+@available(iOS 18.0, *)
+extension CameraController: AVCaptureSessionControlsDelegate {
+    func sessionControlsDidBecomeActive(_ session: AVCaptureSession) {}
+
+    func sessionControlsWillEnterFullscreenAppearance(_ session: AVCaptureSession) {
+        publish { $0.isSystemControlFullscreen = true }
+    }
+
+    func sessionControlsWillExitFullscreenAppearance(_ session: AVCaptureSession) {
+        publish { $0.isSystemControlFullscreen = false }
+    }
+
+    func sessionControlsDidBecomeInactive(_ session: AVCaptureSession) {
+        publish { $0.isSystemControlFullscreen = false }
     }
 }

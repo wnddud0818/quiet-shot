@@ -3,7 +3,7 @@
 Swift + SwiftUI + AVFoundation으로 만든 **네이티브 iOS 무음 카메라 앱**입니다.
 지역(한국·일본 판매 모델 포함)과 관계없이 셔터음 없이 촬영하고, 기기가 허용하는 **최대 해상도**로 저장합니다.
 
-- 지원: iOS 17 이상 (iOS 18 / 26 / 27 포함), iPhone
+- 지원: iOS 17 이상 (iOS 18 / 26 / 27 포함), iPhone · **iPhone Duo**(폴더블, iOS 27.1+)
 - 외부 라이브러리 없음
 
 ## 무음 원리 — 두 가지 캡처 엔진 (자동 선택)
@@ -48,14 +48,35 @@ Swift + SwiftUI + AVFoundation으로 만든 **네이티브 iOS 무음 카메라 
 
 ## 기능
 
-- 탭: 1장 촬영 / **길게 누르기: 연속 촬영** (손 뗄 때까지)
-- **촬영 비율 선택: 4:3 / 3:2 / 16:9 / 1:1** (상단 비율 버튼 또는 설정) — iPhone 기본 카메라처럼 센서 전체 이미지를 중앙 크롭하며,
-  미리보기에 보이는 영역이 그대로 저장됩니다. 상단 배지에 선택한 비율의 실제 저장 해상도가 표시됩니다
-  (예: 12MP 센서 → 4:3 12MP, 3:2 10MP, 16:9·1:1 9MP / 48MP 사진 파이프라인 → 16:9 36MP).
-- 후면 렌즈 전환(0.5× / 1× / 망원) — 렌즈마다 별도 물리 카메라를 사용해 렌즈별 최대 해상도 유지
-- 핀치 줌, 탭 초점/노출, 손전등, 전면/후면 전환
-- HEIC / JPEG 선택, 전면 카메라 좌우 반전 저장, 격자, 촬영 진동(기본 꺼짐)
-- 촬영 피드백은 소리 대신 화면 깜빡임
+**촬영**
+- 셔터 탭: 1장 촬영 / **길게 누르기: 손 뗄 때까지 연속 촬영**
+- **볼륨 버튼 · 카메라 제어 버튼(iPhone 16+) · AirPods**로도 촬영 (AirPods 촬영음도 끔)
+- **셀프 타이머** 3초 / 10초 — 소리 없이 화면 카운트다운, 셔터를 다시 누르면 취소
+- 소리 대신 화면 깜빡임 + (선택) 햅틱으로 촬영 피드백
+
+**줌**
+- 후면은 멀티 렌즈 가상 카메라로 **0.5× → 1× → 2× → 3×/5×가 끊김 없이** 이어짐
+- 줌 버튼 탭 / 버튼 줄을 **좌우로 끌면 줌 다이얼** / 핀치 / 카메라 제어 버튼 슬라이더
+- **전면 카메라 0.8×(넓게, 센서 전체) · 1×(표준)** 전환, 마지막 선택 기억
+- iPhone 17 이후의 정사각형 센서 Center Stage 전면 카메라 지원
+
+**초점 · 노출**
+- 탭: 초점/노출 → 표시가 떠 있을 때 **위아래로 끌면 노출(±2EV)** 조절 (해 아이콘)
+- **길게 누르기: AE/AF 잠금**
+
+**빠른 설정**
+- 상단 배지(무음 · 해상도)를 누르거나 **미리보기를 위로 쓸어 올리면** 비율 / 타이머 / 격자 / HEIC·JPEG
+- **촬영 비율 4:3 / 3:2 / 16:9 / 1:1** — iPhone 기본 카메라처럼 센서 전체 이미지를 중앙 크롭, 미리보기 영역 그대로 저장
+  (예: 12MP 센서 → 4:3 12MP, 3:2 10MP, 16:9·1:1 9MP / 48MP 사진 파이프라인 → 16:9 36MP)
+- 전면/후면 전환 시 뒤집기 애니메이션, 새 사진 썸네일 애니메이션, 민트색 포인트 디자인
+
+**iPhone Duo (폴더블)**
+- 접으면 **바깥 화면 카메라**, 펼치면 **안쪽 화면 카메라** 등 사용자를 향한 전면 카메라로 자동 전환
+  (`AVCaptureDeviceDirectionCoordinator`; 1080p로 제한되는 가상 전면 카메라 대신 개별 카메라 사용)
+- 안쪽 화면이 가로로 돌아가도 쓸 수 있는 가로 레이아웃, 화면 방향에 맞춘 아이콘 회전
+
+**저장**
+- HEIC / JPEG, 전면 카메라 좌우 반전 저장, 격자, 햅틱(기본 꺼짐 — 조용한 곳에서 진동음이 들릴 수 있음)
 - 사진 보관함에는 "사진 추가 전용" 권한만 사용
 
 ## IPA 다운로드
@@ -68,7 +89,8 @@ Swift + SwiftUI + AVFoundation으로 만든 **네이티브 iOS 무음 카메라 
 
 ## 빌드 & 설치
 
-1. Mac에서 **Xcode 16 이상**(iOS 27용은 Xcode 27 권장)으로 `QuietShot.xcodeproj`를 엽니다.
+1. Mac에서 **Xcode 26 이상**으로 `QuietShot.xcodeproj`를 엽니다. **iPhone Duo 기능은 Xcode 27.1 이상**으로 빌드해야 포함됩니다
+   (더 낮은 Xcode에서는 Duo 전용 코드만 빠지고 나머지는 그대로 빌드됩니다).
 2. 타깃 **QuietShot → Signing & Capabilities**
    - Team: 본인 Apple ID 팀 선택
    - Bundle Identifier: `com.quietshot.camera` → 본인 고유 값으로 변경 (예: `com.yourname.quietshot`)
@@ -85,14 +107,17 @@ QuietShot/
 ├─ Camera/
 │  ├─ CameraController.swift           세션 구성, 엔진 선택, 무음 캡처 (핵심)
 │  ├─ FormatSelector.swift             최대 해상도 포맷 선택
-│  ├─ LensOption.swift                 후면 렌즈 탐색/배율 계산
+│  ├─ ZoomModel.swift                  줌 버튼·배율 계산 (후면 가상 카메라, 전면 넓게/표준)
+│  ├─ DuoSupport.swift                 iPhone Duo 전용 API (iOS 27.1 SDK에서만 컴파일)
 │  └─ PhotoCaptureProcessor.swift      사진 파이프라인 델리게이트
 ├─ Support/
 │  ├─ ImageEncoder.swift               HEIC/JPEG 인코딩 + EXIF
 │  ├─ PhotoLibrarySaver.swift          사진 보관함 저장
+│  ├─ MetadataBuilder.swift            EXIF/TIFF/GPS 메타데이터
+│  ├─ LocationProvider.swift           GPS 위치·방향
 │  ├─ DeviceOrientationMonitor.swift   아이콘 회전용 기기 방향
-│  └─ Settings.swift                   설정 키 / 저장 형식
-└─ Views/                              SwiftUI 화면
+│  └─ Settings.swift                   설정 키 / 저장 형식 / 비율 / 타이머
+└─ Views/                              SwiftUI 화면 (CameraScreen, ZoomControl, FocusOverlay, QuickControls …)
 ```
 
 ## 참고

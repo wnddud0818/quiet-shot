@@ -11,6 +11,26 @@ enum SettingsKey {
     static let forceFrameEngine = "forceFrameEngine"
     static let saveLocation = "saveLocation"
     static let aspectRatio = "aspectRatio"
+    static let captureTimer = "captureTimer"
+    /// 전면 카메라를 "넓게(0.8×)"로 쓸지 (false면 표준 1×)
+    static let frontWideFraming = "frontWideFraming"
+}
+
+/// 셀프 타이머 (소리 없이 화면 카운트다운만)
+enum CaptureTimer: Int, CaseIterable, Identifiable {
+    case off = 0
+    case three = 3
+    case ten = 10
+
+    var id: Int { rawValue }
+    var title: String { self == .off ? "끔" : "\(rawValue)초" }
+    var next: CaptureTimer {
+        switch self {
+        case .off: return .three
+        case .three: return .ten
+        case .ten: return .off
+        }
+    }
 }
 
 /// 촬영 비율. iPhone 기본 카메라처럼 센서 전체(4:3) 이미지의 중앙을 잘라 만듭니다.
@@ -37,8 +57,15 @@ enum AspectRatioOption: String, CaseIterable, Identifiable {
     var portraitAspect: CGFloat { CGFloat(1 / longToShort) }
 
     /// width×height 이미지를 이 비율로 중앙 크롭했을 때의 크기 (짝수 픽셀)
-    func croppedSize(width: Int, height: Int) -> (width: Int, height: Int) {
+    /// - squarePrefersLandscape: 정사각형 센서 이미지일 때 가로(true)/세로(false) 중 어느 방향으로 자를지
+    func croppedSize(width: Int, height: Int, squarePrefersLandscape: Bool = false) -> (width: Int, height: Int) {
         guard width > 0, height > 0 else { return (width, height) }
+        if width == height, self != .square {
+            let side = width
+            var short = Int((Double(side) / longToShort).rounded())
+            short -= short % 2
+            return squarePrefersLandscape ? (side, short) : (short, side)
+        }
         let longSide = max(width, height)
         let shortSide = min(width, height)
         let current = Double(longSide) / Double(shortSide)
@@ -57,8 +84,9 @@ enum AspectRatioOption: String, CaseIterable, Identifiable {
     }
 
     /// rect 안에서 이 비율로 중앙 크롭한 영역
-    func centeredCropRect(in rect: CGRect) -> CGRect {
-        let size = croppedSize(width: Int(rect.width.rounded()), height: Int(rect.height.rounded()))
+    func centeredCropRect(in rect: CGRect, squarePrefersLandscape: Bool = false) -> CGRect {
+        let size = croppedSize(width: Int(rect.width.rounded()), height: Int(rect.height.rounded()),
+                               squarePrefersLandscape: squarePrefersLandscape)
         let width = CGFloat(size.width)
         let height = CGFloat(size.height)
         return CGRect(
