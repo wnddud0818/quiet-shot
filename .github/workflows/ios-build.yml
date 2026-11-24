@@ -41,3 +41,54 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build 2>&1 | tee build.log | grep -E "error:|warning:|BUILD (SUCCEEDED|FAILED)" || true
           grep -q "BUILD SUCCEEDED" build.log
+
+  ipa:
+    name: Package unsigned IPA (Xcode 27)
+    # main 푸시 또는 수동 실행 시에만 IPA 생성
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Select newest installed Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$XCODE" ]; then sudo xcode-select -s "$XCODE"; fi
+          xcodebuild -version
+
+      - name: Archive (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project QuietShot.xcodeproj \
+            -scheme QuietShot \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/QuietShot.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            archive 2>&1 | tee archive.log | grep -E "error:|warning:|ARCHIVE (SUCCEEDED|FAILED)" || true
+          grep -q "ARCHIVE SUCCEEDED" archive.log
+
+      - name: Package IPA
+        run: |
+          APP=build/QuietShot.xcarchive/Products/Applications/QuietShot.app
+          test -d "$APP"
+          mkdir -p build/ipa/Payload
+          cp -R "$APP" build/ipa/Payload/
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP/Info.plist")
+          BUILD=$(/usr/libexec/PlistBuddy -c "Print CFBundleVersion" "$APP/Info.plist")
+          (cd build/ipa && zip -qry "../QuietShot-${VERSION}-${BUILD}-unsigned.ipa" Payload)
+          ls -la build/*.ipa
+          /usr/libexec/PlistBuddy -c "Print MinimumOSVersion" "$APP/Info.plist"
+          lipo -info "$APP/QuietShot"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: QuietShot-unsigned-ipa
+          path: build/*.ipa
+          if-no-files-found: error
+          retention-days: 30
