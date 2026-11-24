@@ -12,11 +12,13 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.forceFrameEngine) private var forceFrameEngine = false
     @AppStorage(SettingsKey.saveLocation) private var saveLocation = true
     @AppStorage(SettingsKey.aspectRatio) private var aspectRatio: AspectRatioOption = .fourThree
+    @AppStorage(SettingsKey.captureTimer) private var captureTimer: CaptureTimer = .off
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
+                    LabeledContent("카메라", value: camera.cameraLabel)
                     LabeledContent("저장 해상도", value: camera.resolutionText(for: aspectRatio))
                     LabeledContent("캡처 방식", value: camera.engine.title)
                     LabeledContent("셔터음", value: "없음 (무음)")
@@ -60,8 +62,13 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Picker("셀프 타이머", selection: $captureTimer) {
+                        ForEach(CaptureTimer.allCases) { timer in
+                            Text(timer.title).tag(timer)
+                        }
+                    }
                     Toggle("격자 표시", isOn: $showGrid)
-                    Toggle("촬영 시 진동", isOn: $hapticOnCapture)
+                    Toggle("햅틱 피드백", isOn: $hapticOnCapture)
                     if camera.shutterSuppressionSupported {
                         Toggle("항상 프레임 캡처 사용", isOn: $forceFrameEngine)
                             .onChange(of: forceFrameEngine) { _, _ in
@@ -71,7 +78,7 @@ struct SettingsView: View {
                 } header: {
                     Text("촬영")
                 } footer: {
-                    Text("셔터 버튼을 길게 누르면 손을 뗄 때까지 연속 촬영합니다. 촬영 시 진동은 조용한 곳에서 들릴 수 있어 기본으로 꺼져 있습니다.")
+                    Text("셔터: 탭하면 촬영, 길게 누르면 연속 촬영. 볼륨 버튼·카메라 제어 버튼으로도 촬영할 수 있습니다.\n미리보기: 탭하면 초점, 길게 누르면 AE/AF 잠금, 초점 표시 후 위아래로 끌면 노출 조절, 위로 쓸어 올리면 빠른 설정.\n줌: 버튼을 탭하거나 좌우로 끌면 다이얼이 나타납니다. 전면 카메라는 0.8(넓게)·1×(표준)를 지원합니다.\n햅틱은 조용한 곳에서 진동음이 들릴 수 있어 기본으로 꺼져 있습니다.")
                 }
             }
             .navigationTitle("설정")

@@ -1,10 +1,35 @@
 import SwiftUI
 import UIKit
 
+/// QuietShot 고유 스타일 (기본 카메라의 노란색 대신 민트 포인트)
+enum Theme {
+    static let accent = Color(red: 0.38, green: 0.91, blue: 0.72)
+    static let chip = Color.white.opacity(0.14)
+    static let glass = Color.black.opacity(0.55)
+}
+
+/// 햅틱 (설정에서 켰을 때만. 조용한 곳에서 진동음이 들릴 수 있어 기본은 꺼짐)
+enum Haptics {
+    static var isEnabled: Bool {
+        UserDefaults.standard.bool(forKey: SettingsKey.hapticOnCapture)
+    }
+
+    static func impact(_ style: UIImpactFeedbackGenerator.FeedbackStyle = .light) {
+        guard isEnabled else { return }
+        UIImpactFeedbackGenerator(style: style).impactOccurred()
+    }
+
+    static func selection() {
+        guard isEnabled else { return }
+        UISelectionFeedbackGenerator().selectionChanged()
+    }
+}
+
 struct CircleIconButton: View {
     let systemName: String
     var size: CGFloat = 40
     var tint: Color = .white
+    var background: Color = Theme.chip
     let action: () -> Void
 
     var body: some View {
@@ -13,9 +38,19 @@ struct CircleIconButton: View {
                 .font(.system(size: size * 0.42, weight: .semibold))
                 .foregroundStyle(tint)
                 .frame(width: size, height: size)
-                .background(Circle().fill(Color.white.opacity(0.14)))
+                .background(Circle().fill(background))
+                .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableStyle())
+    }
+}
+
+/// 누를 때 살짝 작아지는 버튼 스타일
+struct PressableStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.9 : 1)
+            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
     }
 }
 
@@ -40,28 +75,6 @@ struct GridOverlay: View {
     }
 }
 
-/// 탭한 위치에 나타나는 초점 표시
-struct FocusSquare: View {
-    @State private var scale: CGFloat = 1.4
-    @State private var opacity: Double = 1
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: 4)
-            .stroke(Color.yellow, lineWidth: 1.5)
-            .frame(width: 72, height: 72)
-            .scaleEffect(scale)
-            .opacity(opacity)
-            .onAppear {
-                withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
-                    scale = 1
-                }
-                withAnimation(.easeOut(duration: 0.4).delay(1.2)) {
-                    opacity = 0
-                }
-            }
-    }
-}
-
 struct PermissionView: View {
     var body: some View {
         VStack(spacing: 16) {
@@ -79,6 +92,7 @@ struct PermissionView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
+            .tint(Theme.accent)
         }
         .padding(32)
         .foregroundStyle(.white)
