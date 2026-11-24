@@ -1,0 +1,25 @@
+name: SDK API probe (temporary)
+on:
+  push:
+    branches: [claude/sharp-babbage-fbtvjl]
+jobs:
+  probe:
+    runs-on: xcode-27
+    steps:
+      - name: Print iPhone Duo UI headers
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE" >/dev/null
+          F="$(xcrun --sdk iphoneos --show-sdk-path)/System/Library/Frameworks"
+          show() { echo "######## $1 [$2]"; sed -n "$2p" "$F/$1" | grep -v '^\s*$' | grep -v '^\s*///\s*$' | cut -c1-210; }
+          show UIKit.framework/Headers/UIViewReservedRegion.h 1,90
+          show UIKit.framework/Headers/UIView.h 755,775
+          show UIKit.framework/Headers/UISceneAccessory.h 1,85
+          show UIKit.framework/Headers/UISceneAccessoryRegistration.h 1,60
+          show UIKit.framework/Headers/UIViewController.h 355,375
+          echo "######## AVCaptureVideoPreviewLayer new API"
+          grep -n -B3 -E "ios\(2[67]" "$F/AVFoundation.framework/Headers/AVCaptureVideoPreviewLayer.h" | cut -c1-210 | head -40
+          echo "######## SwiftUI swiftinterface"
+          SI=$(find "$F/SwiftUI.framework" "$F/SwiftUICore.framework" -name "arm64e-apple-ios.swiftinterface" 2>/dev/null)
+          echo "$SI"
+          grep -h -n -E "ReservedRegion|reservedRegions|struct Hinge|hingeState|HingeStatus|ArrangementView" $SI | cut -c1-230 | head -60
