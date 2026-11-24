@@ -6,3 +6,7 @@ xcuserdata/
 *.xcscmblueprint
 *.xccheckout
 .DS_Store
+
+# Build artifacts
+*.ipa
+*.xcarchive/
