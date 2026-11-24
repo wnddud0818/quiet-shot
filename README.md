@@ -46,7 +46,7 @@ Swift + SwiftUI + AVFoundation으로 만든 **네이티브 iOS 무음 카메라 
 3. iPhone을 연결하고 실행 (▶). 카메라는 **실기기에서만** 동작합니다(시뮬레이터 불가).
 4. 처음 실행 시 iPhone에서 *설정 > 개인정보 보호 및 보안 > 개발자 모드*가 필요할 수 있습니다.
 
-CI(GitHub Actions, `.github/workflows/ios-build.yml`)가 푸시할 때마다 최신 Xcode로 서명 없이 빌드를 검증합니다.
+CI(GitHub Actions, `.github/workflows/ios-build.yml`)가 푸시할 때마다 **Xcode 26(iOS 26 SDK)과 Xcode 27(iOS 27 SDK)** 두 환경에서 서명 없이 빌드를 검증합니다.
 
 ## 구조
 
