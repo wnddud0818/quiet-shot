@@ -447,26 +447,14 @@ final class CameraController: NSObject, ObservableObject {
         return nil
     }
 
-    /// iPhone Duo의 개별 전면 카메라(바깥/안쪽 화면)인지
-    static func isDuoFrontCamera(_ type: AVCaptureDevice.DeviceType) -> Bool {
-        if #available(iOS 27.1, *) {
-            return type == .builtInOuterUltraWideCamera || type == .builtInInnerUltraWideCamera
-        }
-        return false
-    }
-
     /// 전면 카메라 후보 (우선순위 순)
     /// - iPhone Duo: 바깥/안쪽 화면 개별 카메라 (가상 전면 카메라는 1080p 제한이라 사용하지 않음)
     /// - iPhone 17 이후: 정사각형 센서 Center Stage 카메라 (.builtInUltraWideCamera)
     /// - 그 외: 기존 전면 광각 카메라
     static func frontCandidates() -> [AVCaptureDevice] {
-        var types: [AVCaptureDevice.DeviceType] = []
-        if #available(iOS 27.1, *) {
-            types += [.builtInOuterUltraWideCamera, .builtInInnerUltraWideCamera]
-        }
-        types += [.builtInUltraWideCamera, .builtInWideAngleCamera]
+        let types: [AVCaptureDevice.DeviceType] = DuoSupport.frontCameraTypes + [.builtInUltraWideCamera, .builtInWideAngleCamera]
         let devices = AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video, position: .front).devices
-        let duo = devices.filter { isDuoFrontCamera($0.deviceType) }
+        let duo = devices.filter { DuoSupport.isDuoFrontCamera($0.deviceType) }
         if !duo.isEmpty { return duo }
         return types.compactMap { type in devices.first(where: { $0.deviceType == type }) }
     }
@@ -482,11 +470,7 @@ final class CameraController: NSObject, ObservableObject {
 
     static func label(for device: AVCaptureDevice) -> String {
         guard device.position == .front else { return "후면" }
-        if #available(iOS 27.1, *) {
-            if device.deviceType == .builtInOuterUltraWideCamera { return "전면 · 바깥 화면" }
-            if device.deviceType == .builtInInnerUltraWideCamera { return "전면 · 안쪽 화면" }
-        }
-        return "전면"
+        return DuoSupport.label(for: device.deviceType) ?? "전면"
     }
 
     /// iPhone Duo: 화면이 접히거나 펼쳐져 사용자를 향한 카메라가 바뀌면 호출 (메인 스레드)

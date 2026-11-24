@@ -143,12 +143,8 @@ struct CameraPreview: UIViewRepresentable {
         // MARK: iPhone Duo — 어느 전면 카메라가 사용자를 향하는지
 
         func installDirectionCoordinator(on view: UIView) {
-            guard #available(iOS 27.1, *) else { return }
-            let types: [AVCaptureDevice.DeviceType] = [.builtInOuterUltraWideCamera, .builtInInnerUltraWideCamera]
-            let duoCameras = AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video, position: .front).devices
-            guard !duoCameras.isEmpty else { return }   // iPhone Duo가 아니면 필요 없음
-            directionCoordinator = AVCaptureDeviceDirectionCoordinator(view: view, deviceTypes: types) { [weak self] directions in
-                let ids = directions.forwardFacingDeviceDescriptors.map(\.uniqueID)
+            // iPhone Duo가 아니거나 iOS 27.1 SDK가 아니면 nil
+            directionCoordinator = DuoSupport.makeDirectionCoordinator(view: view) { [weak self] ids in
                 self?.parent.onForwardFacingCamerasChange(ids)
             }
         }
