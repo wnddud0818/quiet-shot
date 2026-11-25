@@ -34,14 +34,20 @@ enum DuoSupport {
 
     /// 화면이 접히거나 펼쳐질 때 사용자 쪽을 향한 카메라 ID 목록을 알려 주는 코디네이터.
     /// iPhone Duo가 아니면 nil. 반환값을 보관해야 계속 동작합니다. (메인 스레드에서 호출)
-    static func makeDirectionCoordinator(view: UIView, onChange: @escaping ([String]) -> Void) -> AnyObject? {
+    static func makeDirectionCoordinator(view: UIView, onChange: @escaping ([String], Bool?) -> Void) -> AnyObject? {
         #if canImport(AVKit.AVCaptureDeviceDirectionCoordinator)
         if #available(iOS 27.1, *) {
             let types = frontCameraTypes
             let cameras = AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video, position: .front).devices
             guard !cameras.isEmpty else { return nil }
+            let outerID = cameras.first { $0.deviceType == .builtInOuterUltraWideCamera }?.uniqueID
+            let innerID = cameras.first { $0.deviceType == .builtInInnerUltraWideCamera }?.uniqueID
             return AVCaptureDeviceDirectionCoordinator(view: view, deviceTypes: types) { (directions: AVCaptureDeviceDirectionMap) in
-                onChange(directions.forwardFacingDeviceDescriptors.map { $0.uniqueID })
+                let ids = directions.forwardFacingDeviceDescriptors.map { $0.uniqueID }
+                // 앱을 이미 접거나 펼친 상태에서 켜면 최초 힌지 업데이트 전에도 화면을 식별한다.
+                let outer = outerID.map { ids.contains($0) } ?? false
+                let inner = innerID.map { ids.contains($0) } ?? false
+                onChange(ids, outer == inner ? nil : outer)
             }
         }
         #endif

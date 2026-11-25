@@ -19,6 +19,11 @@ enum PhotoLibrarySaver {
         }
     }
 
+    static var canRequestOrSave: Bool {
+        let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+        return status == .authorized || status == .limited || status == .notDetermined
+    }
+
     /// - Parameters:
     ///   - location: 사진 앱의 지도/장소 정보에도 반영 (파일 EXIF GPS와 별개로 에셋에 기록)
     ///   - creationDate: 사진 앱의 촬영 일시
@@ -27,12 +32,25 @@ enum PhotoLibrarySaver {
                      location: CLLocation?,
                      creationDate: Date,
                      completion: @escaping (Error?) -> Void) {
+        createAsset(location: location, creationDate: creationDate, completion: completion) { request in
+            let options = PHAssetResourceCreationOptions()
+            options.uniformTypeIdentifier = format.utType.identifier
+            request.addResource(with: .photo, data: data, options: options)
+        }
+    }
+
+    static func saveMovie(at url: URL, location: CLLocation?, creationDate: Date, completion: @escaping (Error?) -> Void) {
+        createAsset(location: location, creationDate: creationDate, completion: completion) { request in
+            request.addResource(with: .video, fileURL: url, options: nil)
+        }
+    }
+
+    private static func createAsset(location: CLLocation?, creationDate: Date, completion: @escaping (Error?) -> Void,
+                                    addResource: @escaping (PHAssetCreationRequest) -> Void) {
         let perform = {
             PHPhotoLibrary.shared().performChanges({
                 let request = PHAssetCreationRequest.forAsset()
-                let options = PHAssetResourceCreationOptions()
-                options.uniformTypeIdentifier = format.utType.identifier
-                request.addResource(with: .photo, data: data, options: options)
+                addResource(request)
                 request.creationDate = creationDate
                 if let location {
                     request.location = location

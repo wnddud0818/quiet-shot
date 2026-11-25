@@ -71,5 +71,9 @@ struct ShutterButton: View {
         .accessibilityHint("탭하면 촬영, 길게 누르면 연속 촬영")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { onTap() }
+        .onDisappear {
+            holdTask?.cancel()
+            if burstActive { onBurstEnd() }
+        }
     }
 }

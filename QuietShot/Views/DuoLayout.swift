@@ -6,6 +6,46 @@ import UIKit
 // 접는 선·안쪽 화면 카메라 구멍·바깥 화면 액세서리 API는 iOS 27.1 SDK(Xcode 27.1+)에만 있으므로
 // DuoSupport.swift와 같은 조건으로 컴파일하고, 실행 시에도 #available(iOS 27.1, *)로 확인합니다.
 
+/// nil은 힌지가 없는 기기, true는 닫힌 바깥 화면이다.
+struct DuoHingeObserver: ViewModifier {
+    @Binding var isClosed: Bool?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        #if canImport(AVKit.AVCaptureDeviceDirectionCoordinator)
+        if #available(iOS 27.1, *) {
+            content.onHingeChange { _, context in
+                let closed = context.hinge.map { $0.status == .closed }
+                if isClosed != closed { isClosed = closed }
+            }
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
+    }
+}
+
+/// 안쪽 화면에서 시스템이 장면을 회전시켜도 같은 물리적 위치에 카메라 UI를 배치한다.
+/// 내부 GeometryReader가 접는 선, 카메라 구멍, 제스처를 모두 보정된 좌표계로 읽는다.
+struct DuoCameraViewport<Content: View>: View {
+    let compensation: Double
+    @ViewBuilder let content: (GeometryProxy) -> Content
+
+    var body: some View {
+        GeometryReader { viewport in
+            let swapAxes = Int(abs(compensation) / 90) % 2 == 1
+            GeometryReader(content: content)
+                .frame(width: swapAxes ? viewport.size.height : viewport.size.width,
+                       height: swapAxes ? viewport.size.width : viewport.size.height)
+                .rotationEffect(.degrees(compensation))
+                .position(x: viewport.size.width / 2, y: viewport.size.height / 2)
+                .animation(nil, value: compensation)
+        }
+    }
+}
+
 /// 접는 선(division)과 안쪽 화면 카메라(occlusion) 위치
 struct DuoRegions: Equatable {
     /// 반쯤 접혔을 때의 접는 선 영역 (평평하게 펴져 있으면 nil)
@@ -113,12 +153,13 @@ struct OuterDisplayPreview: View {
             Color.white.opacity(flashOpacity).ignoresSafeArea()
             VStack {
                 Spacer()
-                Label("QuietShot", systemImage: "speaker.slash.fill")
+                Label(camera.isRecording ? "녹화 중" : "QuietShot",
+                      systemImage: camera.isRecording ? "record.circle.fill" : (camera.captureMode == .video ? "video.fill" : "speaker.slash.fill"))
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
-                    .background(Capsule().fill(Color.black.opacity(0.5)))
+                    .background(Capsule().fill(camera.isRecording ? Color.red : Color.black.opacity(0.5)))
                     .padding(.bottom, 18)
             }
         }

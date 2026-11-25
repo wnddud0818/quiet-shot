@@ -36,10 +36,30 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
+    enum CaptureMode: Hashable { case photo, video }
+
+    enum RecordingState: Equatable {
+        case idle, starting, recording(Date), finishing
+    }
+
     // MARK: - UI 상태 (메인 스레드에서만 변경)
 
     @Published private(set) var status: Status = .idle
     @Published private(set) var engine: Engine = .videoFrame
+    @Published private(set) var captureMode: CaptureMode = .photo
+    @Published private(set) var isChangingMode = false
+    @Published private(set) var recordingState: RecordingState = .idle
+    @Published private(set) var recordsAudio = false
+    @Published private(set) var movieQuality: MovieQuality?
+    @Published private(set) var supportedMovieQualities: [MovieQuality] = []
+
+    var canEditMovieSettings: Bool {
+        captureMode == .video && status == .running && recordingState == .idle && !isChangingMode && !isSwitchingCamera
+    }
+    var microphonePermissionDenied: Bool {
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        return status == .denied || status == .restricted
+    }
     @Published private(set) var outputDimensions = CMVideoDimensions(width: 0, height: 0)
     var position: AVCaptureDevice.Position { previewSource?.device.position ?? .back }
     @Published private(set) var zoom: ZoomConfiguration = .single
@@ -107,6 +127,19 @@ final class CameraController: NSObject, ObservableObject {
 
     private let photoOutput = AVCapturePhotoOutput()
     private let videoOutput = AVCaptureVideoDataOutput()
+    private let movieOutput = AVCaptureMovieFileOutput()
+    private var microphoneInput: AVCaptureDeviceInput?
+    private var movieFormats: [MovieQuality: AVCaptureDevice.Format] = [:]
+    private var activeMode: CaptureMode = .photo
+    // sessionQueue owns a take until AVFoundation finishes writing its file.
+    private struct MovieTake {
+        let url: URL
+        let date: Date
+        let location: CLLocation?
+        var didStart = false
+        var stopRequested = false
+    }
+    private var movieTake: MovieTake?
     private var videoInput: AVCaptureDeviceInput?
     private var activeEngine: Engine = .videoFrame
     private var isConfigured = false
@@ -131,6 +164,7 @@ final class CameraController: NSObject, ObservableObject {
 
     private var captureRotationCoordinator: AVCaptureDevice.RotationCoordinator?
     private var burstTimer: Timer?
+    private var movieBackgroundTask: UIBackgroundTaskIdentifier = .invalid
 
     // MARK: - 캡처 파이프라인 (락으로 보호)
 
@@ -179,6 +213,11 @@ final class CameraController: NSObject, ObservableObject {
             }
         )
         notificationTokens.append(
+            center.addObserver(forName: .AVCaptureSessionWasInterrupted, object: session, queue: .main) { [weak self] _ in
+                self?.stopRecording()
+            }
+        )
+        notificationTokens.append(
             center.addObserver(forName: .AVCaptureDeviceSubjectAreaDidChange, object: nil, queue: nil) { [weak self] _ in
                 self?.unlockFocus()
             }
@@ -217,6 +256,129 @@ final class CameraController: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self, self.isConfigured, let device = self.videoInput?.device else { return }
             self.configureSession(with: device)
+        }
+    }
+
+    func setCaptureMode(_ mode: CaptureMode) {
+        guard mode != captureMode, status == .running, !isChangingMode, !isSwitchingCamera,
+              recordingState == .idle else { return }
+        stopBurst()
+        isChangingMode = true
+        let configure = {
+            self.sessionQueue.async {
+                defer { self.publish { $0.isChangingMode = false } }
+                guard let device = self.videoInput?.device else { return }
+                let previousMode = self.activeMode
+                if !self.configureSession(with: device, mode: mode),
+                   self.configureSession(with: device, mode: previousMode) {
+                    self.publish {
+                        $0.status = .running
+                        $0.toast = "촬영 모드를 전환하지 못했습니다."
+                    }
+                }
+            }
+        }
+        requestMicrophoneIfNeeded(mode == .video && Self.prefersMicrophone, then: configure)
+    }
+
+    private static var prefersMicrophone: Bool {
+        UserDefaults.standard.object(forKey: SettingsKey.movieMicrophone) as? Bool ?? true
+    }
+
+    private func requestMicrophoneIfNeeded(_ enabled: Bool, then work: @escaping () -> Void) {
+        if enabled, AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { _ in work() }
+        } else {
+            work()
+        }
+    }
+
+    func setMicrophoneEnabled(_ enabled: Bool) {
+        guard canEditMovieSettings else { return }
+        isChangingMode = true
+        requestMicrophoneIfNeeded(enabled) {
+            self.sessionQueue.async {
+                defer { self.publish { $0.isChangingMode = false } }
+                guard self.activeMode == .video, self.movieTake == nil else { return }
+                UserDefaults.standard.set(enabled, forKey: SettingsKey.movieMicrophone)
+                let hasAudio = self.refreshMovieMicrophone()
+                if enabled && !hasAudio {
+                    self.publish {
+                        $0.toast = $0.microphonePermissionDenied ? "설정에서 마이크 접근을 허용해 주세요." : "마이크를 사용할 수 없습니다."
+                    }
+                }
+            }
+        }
+    }
+
+    /// sessionQueue의 구성 트랜잭션 안에서만 입력을 바꾼다. 끄면 MOV에 오디오 트랙이 생기지 않는다.
+    private func configureMicrophoneInput(enabled: Bool) {
+        if enabled {
+            guard microphoneInput == nil, let mic = AVCaptureDevice.default(for: .audio),
+                  let input = try? AVCaptureDeviceInput(device: mic), session.canAddInput(input) else { return }
+            session.addInput(input)
+            microphoneInput = input
+        } else if let input = microphoneInput {
+            session.removeInput(input)
+            microphoneInput = nil
+        }
+    }
+
+    @discardableResult
+    private func refreshMovieMicrophone() -> Bool {
+        let enabled = Self.prefersMicrophone && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        if enabled != (microphoneInput != nil) {
+            session.beginConfiguration()
+            configureMicrophoneInput(enabled: enabled)
+            session.commitConfiguration()
+        }
+        let hasAudio = movieOutput.connection(with: .audio)?.isEnabled == true
+        publish { $0.recordsAudio = hasAudio }
+        return hasAudio
+    }
+
+    func setMovieQuality(_ quality: MovieQuality) {
+        guard canEditMovieSettings, supportedMovieQualities.contains(quality),
+              let source = previewSource else { return }
+        if movieQuality == quality {
+            UserDefaults.standard.set(quality.rawValue, forKey: SettingsKey.movieQuality)
+            return
+        }
+        isChangingMode = true
+        sessionQueue.async {
+            defer { self.publish { $0.isChangingMode = false } }
+            guard self.activeMode == .video, self.movieTake == nil,
+                  self.videoOutput.connection(with: .video) === source.connection,
+                  let format = self.movieFormats[quality], let device = self.videoInput?.device else { return }
+
+            self.session.beginConfiguration()
+            do {
+                try device.lockForConfiguration()
+                let previousZoom = device.videoZoomFactor
+                FormatSelector.applyMovieQuality(quality, format: format, to: device)
+                device.videoZoomFactor = min(max(previousZoom, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
+                device.unlockForConfiguration()
+            } catch {
+                self.session.commitConfiguration()
+                self.publish { $0.toast = "동영상 화질을 변경하지 못했습니다." }
+                return
+            }
+            self.configureVideoPixelFormat()
+            self.configureSystemControls(for: device)
+            self.session.commitConfiguration()
+            let zoom = ZoomConfiguration.make(for: device)
+            self.zoomOnQueue = zoom
+            let zoomFactor = device.videoZoomFactor
+            let active = FormatSelector.activeMovieQuality(of: device, among: Array(self.movieFormats.keys))
+            let diagnostics = Self.diagnostics(for: device, captureMethod: "동영상 녹화", connectionAngle: source.connectionAngle)
+            if active == quality { UserDefaults.standard.set(quality.rawValue, forKey: SettingsKey.movieQuality) }
+            self.publish {
+                $0.movieQuality = active
+                $0.zoom = zoom
+                $0.zoomFactor = zoomFactor
+                $0.diagnostics = diagnostics
+                if active != quality { $0.toast = "선택한 동영상 화질을 적용하지 못했습니다." }
+            }
         }
     }
 
@@ -276,6 +438,8 @@ final class CameraController: NSObject, ObservableObject {
                 return
             }
             guard configureSession(with: device) else { return }
+        } else if activeMode == .video, movieTake == nil {
+            refreshMovieMicrophone()
         }
         if !session.isRunning {
             session.startRunning()
@@ -288,16 +452,20 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     @discardableResult
-    private func configureSession(with device: AVCaptureDevice) -> Bool {
+    private func configureSession(with device: AVCaptureDevice, mode requestedMode: CaptureMode? = nil) -> Bool {
+        guard movieTake == nil else { return false }
+        let mode = requestedMode ?? activeMode
         let forceFrameEngine = UserDefaults.standard.bool(forKey: SettingsKey.forceFrameEngine)
         dropPendingFrameRequests()
 
+        isConfigured = false
         session.beginConfiguration()
         session.inputs.forEach { session.removeInput($0) }
+        microphoneInput = nil
         session.outputs.forEach { session.removeOutput($0) }
 
         // .photo 프리셋은 24MP/48MP 사진을 지원하는 유일한 프리셋
-        if session.canSetSessionPreset(.photo) {
+        if mode == .photo, session.canSetSessionPreset(.photo) {
             session.sessionPreset = .photo
         }
 
@@ -309,10 +477,18 @@ final class CameraController: NSObject, ObservableObject {
         session.addInput(input)
         videoInput = input
 
+        if mode == .video {
+            let presets: [AVCaptureSession.Preset] = [.hd1920x1080, .high, .medium]
+            if let preset = presets.first(where: { session.canSetSessionPreset($0) }) {
+                session.sessionPreset = preset
+            }
+            configureMicrophoneInput(enabled: Self.prefersMicrophone && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized)
+        }
+
         // 1) 엔진 결정: 셔터음 억제가 "허용된" 기기에서만 사진 파이프라인 사용
         var selectedEngine: Engine = .videoFrame
         var suppressionSupported = false
-        if session.canAddOutput(photoOutput) {
+        if mode == .photo, session.canAddOutput(photoOutput) {
             session.addOutput(photoOutput)
             if #available(iOS 18.0, *) {
                 suppressionSupported = photoOutput.isShutterSoundSuppressionSupported
@@ -332,15 +508,31 @@ final class CameraController: NSObject, ObservableObject {
             return false
         }
         session.addOutput(videoOutput)
+        if mode == .video {
+            guard session.canAddOutput(movieOutput) else {
+                session.commitConfiguration()
+                let restored = configureSession(with: device, mode: .photo)
+                publish { $0.toast = "이 카메라에서 동영상 출력을 구성할 수 없습니다." }
+                return restored
+            }
+            session.addOutput(movieOutput)
+        }
         session.automaticallyConfiguresCaptureDeviceForWideColor = selectedEngine == .photoPipeline
+        movieFormats = mode == .video ? FormatSelector.movieFormats(for: device) : [:]
+        let qualities = MovieQuality.allCases.filter { movieFormats[$0] != nil }
+        let preferred = MovieQuality.preferred
+        let selectedQuality = MovieQuality.bestMatch(in: qualities, resolution: preferred.resolution, fps: preferred.fps)
 
         // 2) 기기 설정 (프레임 엔진은 스트림 해상도가 가장 큰 포맷을 직접 지정)
         do {
             try device.lockForConfiguration()
-            if selectedEngine == .videoFrame, let format = FormatSelector.bestFrameFormat(for: device) {
+            if let selectedQuality, let format = movieFormats[selectedQuality] {
+                FormatSelector.applyMovieQuality(selectedQuality, format: format, to: device)
+            }
+            if mode == .photo, selectedEngine == .videoFrame, let format = FormatSelector.bestFrameFormat(for: device) {
                 device.activeFormat = format
             }
-            if selectedEngine == .videoFrame, device.activeFormat.supportedColorSpaces.contains(.P3_D65) {
+            if mode == .photo, selectedEngine == .videoFrame, device.activeFormat.supportedColorSpaces.contains(.P3_D65) {
                 device.activeColorSpace = .P3_D65
             }
             if device.isFocusModeSupported(.continuousAutoFocus) {
@@ -363,10 +555,7 @@ final class CameraController: NSObject, ObservableObject {
 
         // 3) 비디오 출력 설정 (사진 출력은 프리셋이 확정된 뒤 아래에서 설정)
         do {
-            let fullRange = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-            if videoOutput.availableVideoPixelFormatTypes.contains(fullRange) {
-                videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: fullRange]
-            }
+            configureVideoPixelFormat()
             videoOutput.alwaysDiscardsLateVideoFrames = true
             videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
             if let connection = videoOutput.connection(with: .video) {
@@ -385,8 +574,8 @@ final class CameraController: NSObject, ObservableObject {
 
         session.commitConfiguration()
 
-        isConfigured = true
         activeEngine = selectedEngine
+        activeMode = mode
 
         if selectedEngine == .photoPipeline {
             // .photo 프리셋이 적용된 activeFormat 기준으로 최대 사진 해상도(예: 48MP) 지정
@@ -432,8 +621,10 @@ final class CameraController: NSObject, ObservableObject {
             return false
         }
         let connectionAngle = connection.videoRotationAngle
+        isConfigured = true
         let source = PreviewSource(device: device, connection: connection, connectionAngle: connectionAngle)
-        let diagnostics = CameraController.diagnostics(for: device, engine: selectedEngine, connectionAngle: connectionAngle)
+        let captureMethod = mode == .video ? "동영상 녹화" : selectedEngine.title
+        let diagnostics = CameraController.diagnostics(for: device, captureMethod: captureMethod, connectionAngle: connectionAngle)
         // 새 카메라 프레임이 오지 않는 경우를 대비해 전환 가림막은 잠시 후 자동 해제
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             if self?.previewSource?.connection === connection { self?.isSwitchingCamera = false }
@@ -443,8 +634,14 @@ final class CameraController: NSObject, ObservableObject {
         let label = CameraController.label(for: device)
         let zoomNow = device.videoZoomFactor
         let biasNow = device.exposureTargetBias
+        let hasAudio = mode == .video && movieOutput.connection(with: .audio)?.isEnabled == true
+        let activeQuality = FormatSelector.activeMovieQuality(of: device, among: qualities)
 
         publish { controller in
+            controller.captureMode = mode
+            controller.recordsAudio = hasAudio
+            controller.supportedMovieQualities = qualities
+            controller.movieQuality = activeQuality
             controller.engine = selectedEngine
             controller.shutterSuppressionSupported = suppressionSupported
             controller.outputDimensions = dimensions
@@ -468,6 +665,12 @@ final class CameraController: NSObject, ObservableObject {
             self.awaitingFirstFrame = true
         }
         return true
+    }
+
+    private func configureVideoPixelFormat() {
+        let fullRange = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        videoOutput.videoSettings = videoOutput.availableVideoPixelFormatTypes.contains(fullRange)
+            ? [kCVPixelBufferPixelFormatTypeKey as String: fullRange] : [:]
     }
 
     /// 첫 촬영 지연을 줄이기 위해 최대 해상도 촬영 리소스를 미리 준비
@@ -534,16 +737,25 @@ final class CameraController: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.forwardFacingCameraIDs = ids
-            guard self.isConfigured,
-                  let current = self.videoInput?.device, current.position == .front,
-                  let facing = CameraController.frontCandidates().first(where: { ids.contains($0.uniqueID) }),
-                  facing.uniqueID != current.uniqueID else { return }
-            self.publish { $0.isSwitchingCamera = true }
-            self.configureSession(with: facing)
+            self.updateFrontCameraIfNeeded()
         }
     }
 
+    private func updateFrontCameraIfNeeded() {
+        guard isConfigured, let current = videoInput?.device, current.position == .front,
+              let facing = CameraController.frontCandidates().first(where: { forwardFacingCameraIDs.contains($0.uniqueID) }),
+              facing.uniqueID != current.uniqueID else { return }
+        if movieTake != nil {
+            // 접힘으로 전면 카메라가 바뀌면 파일을 먼저 닫고 완료 콜백에서 전환한다.
+            publish { $0.stopRecording() }
+            return
+        }
+        publish { $0.isSwitchingCamera = true }
+        configureSession(with: facing)
+    }
+
     func switchCamera() {
+        guard recordingState == .idle, !isChangingMode else { return }
         stopBurst()
         isSwitchingCamera = true
         sessionQueue.async { [weak self] in
@@ -560,7 +772,7 @@ final class CameraController: NSObject, ObservableObject {
     /// 정사각형 센서(iPhone 17·Duo 전면 Center Stage 카메라): 화면 방향과 같은 비율로 출력
     /// (세로 화면 3:4, 가로 화면 4:3). Apple 예제처럼 구성이 끝난 뒤 별도의 잠금 블록에서 설정합니다.
     private func applyDynamicAspectRatio(to device: AVCaptureDevice) {
-        guard #available(iOS 26.0, *) else { return }
+        guard #available(iOS 26.0, *), activeMode == .photo else { return }
         let supported = device.activeFormat.supportedDynamicAspectRatios
         guard !supported.isEmpty else { return }
         let landscape = interfaceIsLandscapeOnQueue
@@ -735,7 +947,7 @@ final class CameraController: NSObject, ObservableObject {
 
     /// 길게 누르는 동안 연속 촬영
     func startBurst() {
-        guard burstTimer == nil, status == .running else { return }
+        guard burstTimer == nil, status == .running, captureMode == .photo, !isChangingMode else { return }
         burstCount = 0
         isBursting = true
         let interval: TimeInterval = engine == .photoPipeline ? 0.2 : 0.1
@@ -752,7 +964,7 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func capture(isBurst: Bool) {
-        guard status == .running, !isSwitchingCamera, let source = previewSource,
+        guard status == .running, captureMode == .photo, !isChangingMode, !isSwitchingCamera, let source = previewSource,
               let captureRotationCoordinator else { return }
         // 처리 대기 중인 촬영이 너무 많으면(메모리 보호) 연사 프레임은 건너뜀
         guard reserveSlot(limit: isBurst ? 3 : 8) else { return }
@@ -924,12 +1136,12 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
-    private static func diagnostics(for device: AVCaptureDevice, engine: Engine, connectionAngle: CGFloat) -> [String] {
+    private static func diagnostics(for device: AVCaptureDevice, captureMethod: String, connectionAngle: CGFloat) -> [String] {
         let format = FormatSelector.videoDimensions(of: device.activeFormat)
         var lines = [
             "기기: \(DeviceInfo.modelIdentifier) · iOS \(DeviceInfo.systemVersion)",
             "카메라: \(device.localizedName) (\(device.deviceType.rawValue))",
-            "엔진: \(engine.title)",
+            "엔진: \(captureMethod)",
             "포맷: \(format.width)×\(format.height)",
             "출력 회전: \(Int(connectionAngle))°",
         ]
@@ -955,6 +1167,114 @@ final class CameraController: NSObject, ObservableObject {
         case 2: return .down
         case 3: return .left
         default: return .up
+        }
+    }
+}
+
+// MARK: - 동영상 녹화
+
+extension CameraController: AVCaptureFileOutputRecordingDelegate {
+    func startRecording() {
+        guard captureMode == .video, recordingState == .idle, status == .running,
+              !isChangingMode, !isSwitchingCamera, let source = previewSource,
+              let angle = captureRotationCoordinator?.videoRotationAngleForHorizonLevelCapture else { return }
+        guard PhotoLibrarySaver.canRequestOrSave else {
+            toast = PhotoLibrarySaver.SaveError.notAuthorized.localizedDescription
+            return
+        }
+        recordingState = .starting
+        movieBackgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Save movie") { [weak self] in
+            self?.stopRecording()
+            self?.endMovieBackgroundTask()
+        }
+        let options = CaptureOptions.current()
+        let location = options.saveLocation ? LocationProvider.shared.snapshot().location : nil
+        sessionQueue.async {
+            guard self.activeMode == .video, self.movieTake == nil,
+                  self.session.isRunning, !self.session.isInterrupted,
+                  self.videoOutput.connection(with: .video) === source.connection,
+                  let connection = self.movieOutput.connection(with: .video), connection.isActive else {
+                self.finishMovie(message: "카메라가 준비되면 다시 녹화해 주세요.")
+                return
+            }
+            if connection.isVideoRotationAngleSupported(angle) { connection.videoRotationAngle = angle }
+            if connection.isVideoMirroringSupported {
+                connection.automaticallyAdjustsVideoMirroring = false
+                connection.isVideoMirrored = options.mirrorFrontCamera && source.device.position == .front
+            }
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mov")
+            self.movieTake = MovieTake(url: url, date: Date(), location: location)
+            self.movieOutput.startRecording(to: url, recordingDelegate: self)
+        }
+    }
+
+    func stopRecording() {
+        guard recordingState == .starting || isRecording else { return }
+        recordingState = .finishing
+        sessionQueue.async {
+            self.movieTake?.stopRequested = true
+            if self.movieTake?.didStart == true, self.movieOutput.isRecording { self.movieOutput.stopRecording() }
+        }
+    }
+
+    var isRecording: Bool {
+        if case .recording = recordingState { return true }
+        return false
+    }
+
+    func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
+        sessionQueue.async {
+            guard let take = self.movieTake, take.url == fileURL else { return }
+            self.movieTake?.didStart = true
+            if take.stopRequested {
+                if output.isRecording { output.stopRecording() }
+            } else {
+                self.publish { controller in
+                    if controller.recordingState == .starting { controller.recordingState = .recording(take.date) }
+                }
+            }
+        }
+    }
+
+    func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL,
+                    from connections: [AVCaptureConnection], error: Error?) {
+        sessionQueue.async {
+            guard let take = self.movieTake, take.url == outputFileURL else { return }
+            self.movieTake = nil
+            self.publish { $0.recordingState = .finishing }
+            self.updateFrontCameraIfNeeded()
+            if let error = error as NSError?, error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool != true {
+                try? FileManager.default.removeItem(at: take.url)
+                self.finishMovie(message: "녹화 실패 · \(error.localizedDescription)")
+                return
+            }
+            self.processingQueue.async {
+                let generator = AVAssetImageGenerator(asset: AVURLAsset(url: take.url))
+                generator.appliesPreferredTrackTransform = true
+                generator.maximumSize = CGSize(width: 160, height: 160)
+                let frame = try? generator.copyCGImage(at: .zero, actualTime: nil)
+                PhotoLibrarySaver.saveMovie(at: take.url, location: take.location, creationDate: take.date) { error in
+                    try? FileManager.default.removeItem(at: take.url)
+                    self.finishMovie(message: error?.localizedDescription ?? "동영상을 저장했습니다.",
+                                     thumbnail: error == nil ? frame.map { UIImage(cgImage: $0) } : nil)
+                }
+            }
+        }
+    }
+
+    private func finishMovie(message: String, thumbnail: UIImage? = nil) {
+        publish { controller in
+            controller.endMovieBackgroundTask()
+            controller.recordingState = .idle
+            controller.toast = message
+            if let thumbnail { controller.thumbnail = thumbnail }
+        }
+    }
+
+    private func endMovieBackgroundTask() {
+        if movieBackgroundTask != .invalid {
+            UIApplication.shared.endBackgroundTask(movieBackgroundTask)
+            movieBackgroundTask = .invalid
         }
     }
 }
