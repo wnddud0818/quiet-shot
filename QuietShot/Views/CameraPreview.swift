@@ -104,7 +104,6 @@ struct CameraPreview: UIViewRepresentable {
 
 /// 접힘이나 카메라 전환으로 미리보기가 교체되어도 본 화면을 기준으로 방향을 추적한다.
 struct CameraWindowObserver: UIViewRepresentable {
-    let lockedOrientation: UIInterfaceOrientation?
     let onForwardFacingCamerasChange: ([String], Bool?) -> Void
     let onInterfaceOrientationChange: (UIInterfaceOrientation) -> Void
 
@@ -115,22 +114,11 @@ struct CameraWindowObserver: UIViewRepresentable {
     }
 
     func updateUIView(_ view: ObserverView, context: Context) {
-        view.lockedOrientation = lockedOrientation
         view.onForwardFacingCamerasChange = onForwardFacingCamerasChange
         view.onInterfaceOrientationChange = onInterfaceOrientationChange
     }
 
     final class ObserverView: UIView {
-        var lockedOrientation: UIInterfaceOrientation? {
-            didSet {
-                if let window { CameraOrientationDelegate.setOrientationLock(lockedOrientation, in: window) }
-            }
-        }
-
-        override func willMove(toWindow newWindow: UIWindow?) {
-            if let window, window !== newWindow { CameraOrientationDelegate.setOrientationLock(nil, in: window) }
-            super.willMove(toWindow: newWindow)
-        }
         var onForwardFacingCamerasChange: (([String], Bool?) -> Void)?
         var onInterfaceOrientationChange: ((UIInterfaceOrientation) -> Void)?
         private var directionCoordinator: AnyObject?
@@ -142,8 +130,7 @@ struct CameraWindowObserver: UIViewRepresentable {
             geometryObservation?.invalidate()
             directionCoordinator = nil
             lastOrientation = .unknown
-            guard let window, let scene = window.windowScene else { return }
-            CameraOrientationDelegate.setOrientationLock(lockedOrientation, in: window)
+            guard let scene = window?.windowScene else { return }
             directionCoordinator = DuoSupport.makeDirectionCoordinator(view: self) { [weak self, weak scene] ids, outer in
                 guard let self, let scene, self.window?.windowScene === scene else { return }
                 self.onForwardFacingCamerasChange?(ids, outer)

@@ -27,25 +27,6 @@ struct DuoHingeObserver: ViewModifier {
     }
 }
 
-/// 안쪽 화면에서 시스템이 장면을 회전시켜도 같은 물리적 위치에 카메라 UI를 배치한다.
-/// 내부 GeometryReader가 접는 선, 카메라 구멍, 제스처를 모두 보정된 좌표계로 읽는다.
-struct DuoCameraViewport<Content: View>: View {
-    let compensation: Double
-    @ViewBuilder let content: (GeometryProxy) -> Content
-
-    var body: some View {
-        GeometryReader { viewport in
-            let swapAxes = Int(abs(compensation) / 90) % 2 == 1
-            GeometryReader(content: content)
-                .frame(width: swapAxes ? viewport.size.height : viewport.size.width,
-                       height: swapAxes ? viewport.size.width : viewport.size.height)
-                .rotationEffect(.degrees(compensation))
-                .position(x: viewport.size.width / 2, y: viewport.size.height / 2)
-                .animation(nil, value: compensation)
-        }
-    }
-}
-
 /// 접는 선(division)과 안쪽 화면 카메라(occlusion) 위치
 struct DuoRegions: Equatable {
     /// 반쯤 접혔을 때의 접는 선 영역 (평평하게 펴져 있으면 nil)
@@ -95,6 +76,21 @@ struct DuoRegions: Equatable {
                 insets.leading = max(insets.leading, frame.maxX + 6)
             } else if frame.midX > size.width * 0.7 {
                 insets.trailing = max(insets.trailing, size.width - frame.minX + 6)
+            }
+        }
+        return insets
+    }
+
+    /// 세로 조작 열과 실제로 겹치는 구멍만 위나 아래로 피한다.
+    func railInsets(in rail: CGRect) -> EdgeInsets {
+        var insets = EdgeInsets()
+        for region in occlusions {
+            let overlap = region.intersection(rail)
+            guard !overlap.isEmpty else { continue }
+            if overlap.midY < rail.midY {
+                insets.top = max(insets.top, overlap.maxY - rail.minY + 6)
+            } else {
+                insets.bottom = max(insets.bottom, rail.maxY - overlap.minY + 6)
             }
         }
         return insets

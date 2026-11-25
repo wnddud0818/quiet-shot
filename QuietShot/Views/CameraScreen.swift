@@ -3,6 +3,16 @@ import SwiftUI
 import UIKit
 
 struct CameraScreen: View {
+    var body: some View {
+        GeometryReader { geometry in
+            CameraContent(size: geometry.size, regions: DuoRegions.read(geometry))
+        }
+    }
+}
+
+private struct CameraContent: View {
+    let size: CGSize
+    let regions: DuoRegions
     @StateObject private var camera = CameraController()
     @StateObject private var orientation = DeviceOrientationMonitor()
     @Environment(\.scenePhase) private var scenePhase
@@ -36,58 +46,53 @@ struct CameraScreen: View {
     // iPhone Duo
     @State private var hingeReading: Bool?
     @State private var outerCameraFacesView: Bool?
-    @State private var innerOrientation: UIInterfaceOrientation?
     @State private var showDuoSettings = false
     @State private var outerPreviewEnabled = true
     @State private var outerPreviewAvailable = false
+
+    init(size: CGSize, regions: DuoRegions) {
+        self.size = size
+        self.regions = regions
+    }
 
     /// 셀프 타이머 남은 초 (바깥 화면과 공유)
     private var countdown: Int? { camera.countdown }
 
     private var hingeClosed: Bool? { hingeReading ?? outerCameraFacesView }
     private var duoClosed: Bool { hingeClosed == true }
-    private var lockedOrientation: UIInterfaceOrientation? {
-        guard let hingeClosed else { return nil }
-        return hingeClosed ? .portrait : innerOrientation
+    private var innerDisplay: Bool {
+        hingeClosed == false || regions.hasDivision || outerPreviewAvailable
+            || (horizontalSizeClass == .regular && verticalSizeClass == .regular)
     }
-
-    private var layoutAngle: Double { Self.angle(for: lockedOrientation ?? interfaceOrientation) }
+    private var landscape: Bool { size.width > size.height }
 
     var body: some View {
-        DuoCameraViewport(compensation: layoutAngle - Self.angle(for: interfaceOrientation)) { geometry in
-            let landscape = geometry.size.width > geometry.size.height
-            ZStack {
-                Color.black.ignoresSafeArea()
-                switch camera.status {
-                case .idle:
-                    ProgressView().tint(.white)
-                case .unauthorized:
-                    PermissionView()
-                case .unavailable(let message):
-                    UnavailableView(message: message)
-                case .running:
-                    runningContent(geometry: geometry, landscape: landscape)
-                }
+        ZStack {
+            Color.black.ignoresSafeArea()
+            switch camera.status {
+            case .idle:
+                ProgressView().tint(.white)
+            case .unauthorized:
+                PermissionView()
+            case .unavailable(let message):
+                UnavailableView(message: message)
+            case .running:
+                runningContent
             }
-            .overlay(alignment: .top) { toastView }
         }
+        .overlay(alignment: .top) { toastView }
         .background {
             CameraWindowObserver(
-                lockedOrientation: lockedOrientation,
                 onForwardFacingCamerasChange: { ids, outer in
                     outerCameraFacesView = outer
                     camera.updateForwardFacingCameras(ids)
                 },
-                onInterfaceOrientationChange: { orientation in
-                    interfaceOrientation = orientation
-                    if hingeClosed == false, innerOrientation == nil { innerOrientation = orientation }
-                }
+                onInterfaceOrientationChange: { interfaceOrientation = $0 }
             )
             .allowsHitTesting(false)
         }
         .modifier(DuoHingeObserver(isClosed: $hingeReading))
-        .onChange(of: hingeClosed) { _, closed in
-            innerOrientation = closed == false && interfaceOrientation != .unknown ? interfaceOrientation : nil
+        .onChange(of: hingeClosed) {
             drawerOpen = false
             showSettings = false
             showDuoSettings = false
@@ -169,28 +174,21 @@ struct CameraScreen: View {
     // MARK: - iPhone Duo 레이아웃
 
     @ViewBuilder
-    private func runningContent(geometry: GeometryProxy, landscape: Bool) -> some View {
-        let size = geometry.size
-        let regions = DuoRegions.read(geometry)
+    private var runningContent: some View {
         let fold = regions.fold
-        let innerDisplay = hingeClosed == false || regions.hasDivision || outerPreviewAvailable
-            || (horizontalSizeClass == .regular && verticalSizeClass == .regular)
         let persistentControls = duoClosed || fold != nil || innerDisplay
         let previewLandscape: Bool = {
-            if duoClosed { return false }
-            guard let fold else { return landscape }
+            guard !duoClosed, let fold else { return landscape }
             return fold.width >= fold.height ? size.width > fold.minY : fold.minX > size.height
         }()
 
         ZStack {
             if duoClosed {
                 closedDuoLayout
-                    .padding(regions.occlusionInsets(in: size))
             } else if let fold {
                 foldedLayout(fold: fold, size: size)
             } else if innerDisplay {
                 innerDisplayLayout(landscape: landscape)
-                    .padding(regions.occlusionInsets(in: size))
             } else if landscape {
                 landscapeLayout
                     .padding(regions.occlusionInsets(in: size))
@@ -211,25 +209,33 @@ struct CameraScreen: View {
         }
     }
 
-    /// 닫힌 바깥 화면. 기기를 돌려도 미리보기와 오른쪽 조작 열의 위치는 고정한다.
+    /// 바깥 화면은 촬영 비율을 먼저 맞추고 오른쪽 여백이 모자라면 조작 열을 미리보기 위에 얹는다.
     private var closedDuoLayout: some View {
-        HStack(spacing: 0) {
-            previewArea(landscape: false, persistentControls: true)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .overlay(alignment: .trailing) {
-                    if drawerOpen {
-                        ViewThatFits(in: .vertical) {
-                            closedDuoOptions
-                            ScrollView { closedDuoOptions }
-                        }
-                        .padding(.trailing, 6)
+        let railWidth: CGFloat = 96
+        let rail = CGRect(x: size.width - railWidth, y: 0, width: railWidth, height: size.height)
+        return ZStack(alignment: .trailing) {
+            GeometryReader { viewport in
+                let spareWidth = max(0, viewport.size.width - viewport.size.height * previewAspect(landscape: landscape))
+                previewArea(landscape: landscape, persistentControls: true)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.trailing, min(railWidth, spareWidth))
+            }
+            .ignoresSafeArea(.container, edges: .horizontal)
+
+            HStack(spacing: 6) {
+                if drawerOpen {
+                    ViewThatFits(in: .vertical) {
+                        closedDuoOptions
+                        ScrollView { closedDuoOptions }
                     }
                 }
-            ViewThatFits(in: .vertical) {
-                closedDuoRail
-                ScrollView { closedDuoRail }
+                ViewThatFits(in: .vertical) {
+                    closedDuoRail
+                    ScrollView { closedDuoRail }
+                }
+                .frame(width: railWidth)
             }
-            .frame(width: 96)
+            .padding(regions.railInsets(in: rail))
             .padding(.vertical, 8)
         }
     }
@@ -340,6 +346,8 @@ struct CameraScreen: View {
     @ViewBuilder
     private func innerDisplayLayout(landscape: Bool) -> some View {
         if landscape {
+            let toolsWidth: CGFloat = 92
+            let shutterWidth: CGFloat = 120
             HStack(spacing: 0) {
                 VStack(spacing: 16) {
                     torchButton
@@ -351,17 +359,17 @@ struct CameraScreen: View {
                     Spacer(minLength: 0)
                 }
                 .padding(.vertical, 20)
-                .frame(width: 92)
+                .padding(regions.railInsets(in: CGRect(x: 0, y: 0, width: toolsWidth, height: size.height)))
+                .frame(width: toolsWidth)
                 previewArea(landscape: true, persistentControls: true)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 VStack(spacing: 14) {
                     statusPill(vertical: false, persistentControls: true)
-                        .scaleEffect(0.9)
                     bottomControls(vertical: true)
-                        .scaleEffect(1.1)
                 }
                 .padding(.vertical, 24)
-                .frame(width: 150)
+                .padding(regions.railInsets(in: CGRect(x: size.width - shutterWidth, y: 0, width: shutterWidth, height: size.height)))
+                .frame(width: shutterWidth)
             }
         } else {
             VStack(spacing: 10) {
@@ -381,6 +389,7 @@ struct CameraScreen: View {
                     .padding(.horizontal, 48)
                     .padding(.bottom, 18)
             }
+            .padding(regions.occlusionInsets(in: size))
         }
     }
 
@@ -401,7 +410,9 @@ struct CameraScreen: View {
     }
 
     private var iconAngle: Angle {
-        var angle = orientation.iconRotation - layoutAngle
+        // Duo의 조작부는 현재 창과 함께 회전한다. 기울기 센서는 촬영 방향에 계속 사용한다.
+        if duoClosed || innerDisplay { return .zero }
+        var angle = orientation.iconRotation - Self.angle(for: interfaceOrientation)
         if angle > 180 { angle -= 360 }
         if angle <= -180 { angle += 360 }
         return .degrees(angle)
@@ -482,12 +493,15 @@ struct CameraScreen: View {
 
     // MARK: - 미리보기
 
-    private func previewArea(landscape: Bool, persistentControls: Bool = false) -> some View {
+    private func previewAspect(landscape: Bool) -> CGFloat {
         let frame = camera.previewFrameSize
         let movieAspect = frame.width > 0 && frame.height > 0 ? min(frame.width, frame.height) / max(frame.width, frame.height) : 9.0 / 16.0
         let portraitAspect = camera.captureMode == .video ? movieAspect : aspectRatio.portraitAspect
-        let ratio = landscape ? 1 / portraitAspect : portraitAspect
-        return GeometryReader { proxy in
+        return landscape ? 1 / portraitAspect : portraitAspect
+    }
+
+    private func previewArea(landscape: Bool, persistentControls: Bool = false) -> some View {
+        GeometryReader { proxy in
             ZStack {
                 Color.black
                 if let source = camera.previewSource {
@@ -539,7 +553,7 @@ struct CameraScreen: View {
                 }
             }
         }
-        .aspectRatio(ratio, contentMode: .fit)
+        .aspectRatio(previewAspect(landscape: landscape), contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: landscape ? 18 : 0, style: .continuous))
         .animation(.easeInOut(duration: 0.22), value: aspectRatio)
         .animation(.easeInOut(duration: 0.2), value: camera.isSwitchingCamera)
