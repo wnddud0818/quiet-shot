@@ -81,19 +81,13 @@ struct DuoRegions: Equatable {
         return insets
     }
 
-    /// 세로 조작 열과 실제로 겹치는 구멍만 위나 아래로 피한다.
-    func railInsets(in rail: CGRect) -> EdgeInsets {
-        var insets = EdgeInsets()
-        for region in occlusions {
-            let overlap = region.intersection(rail)
-            guard !overlap.isEmpty else { continue }
-            if overlap.midY < rail.midY {
-                insets.top = max(insets.top, overlap.maxY - rail.minY + 6)
-            } else {
-                insets.bottom = max(insets.bottom, rail.maxY - overlap.minY + 6)
-            }
+    func occlusionInsets(in pane: CGRect) -> EdgeInsets {
+        var local = self
+        local.occlusions = occlusions.compactMap { region in
+            let overlap = region.intersection(pane)
+            return overlap.isEmpty ? nil : overlap.offsetBy(dx: -pane.minX, dy: -pane.minY)
         }
-        return insets
+        return local.occlusionInsets(in: pane.size)
     }
 }
 

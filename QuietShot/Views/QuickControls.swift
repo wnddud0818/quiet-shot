@@ -11,9 +11,6 @@ struct QuickControls: View {
     let iconAngle: Angle
     /// iPhone Duo 바깥 화면 미리보기 (사용할 수 없으면 nil → 버튼 숨김)
     var outerPreview: Binding<Bool>? = nil
-    /// 세로로 세우기 (안쪽 화면 옆 패널용)
-    var vertical = false
-    var includesSettings = true
     let onOpenSettings: () -> Void
 
     private enum Expanded { case ratio, timer }
@@ -37,8 +34,8 @@ struct QuickControls: View {
                 mainRow
             }
         }
-        .padding(.horizontal, vertical ? 5 : 6)
-        .padding(.vertical, vertical ? 8 : 5)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 5)
         .background(RoundedRectangle(cornerRadius: 26, style: .continuous).fill(Theme.glass))
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: expanded)
     }
@@ -60,7 +57,7 @@ struct QuickControls: View {
     }
 
     private var mainRow: some View {
-        stack {
+        optionStrip {
             if camera.captureMode == .video {
                 MovieOptions(camera: camera, compact: true, iconAngle: iconAngle)
             } else {
@@ -84,7 +81,7 @@ struct QuickControls: View {
                     outerPreview.wrappedValue.toggle()
                 }
             }
-            if includesSettings { item(icon: "gearshape", caption: "설정", active: false, action: onOpenSettings) }
+            item(icon: "gearshape", caption: "설정", active: false, action: onOpenSettings)
         }
     }
 
@@ -101,34 +98,28 @@ struct QuickControls: View {
                     .lineLimit(1)
             }
             .foregroundStyle(active ? Theme.accent : Color.white)
-            .frame(width: 52, height: vertical ? 52 : 44)
+            .frame(width: 52, height: 44)
             .contentShape(Rectangle())
             .rotationEffect(iconAngle)
         }
         .buttonStyle(PressableStyle())
     }
 
-    /// 가로/세로 배치 전환
-    @ViewBuilder
-    private func stack<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        if vertical {
-            VStack(spacing: 4, content: content)
-        } else {
-            let row = HStack(spacing: 4, content: content)
-            ViewThatFits(in: .horizontal) {
-                row.fixedSize(horizontal: true, vertical: false)
-                ScrollView(.horizontal) { row }
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+    private func optionStrip<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        let row = HStack(spacing: 4, content: content)
+        return ViewThatFits(in: .horizontal) {
+            row.fixedSize(horizontal: true, vertical: false)
+            ScrollView(.horizontal) { row }
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private func optionRow(_ options: [Option]) -> some View {
-        stack {
+        optionStrip {
             Button {
                 expanded = nil
             } label: {
-                Image(systemName: vertical ? "chevron.up" : "chevron.left")
+                Image(systemName: "chevron.left")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(.white)
                     .frame(width: 30, height: 44)

@@ -63,6 +63,8 @@ jobs:
         run: |
           xcrun swiftc QuietShot/Views/FramePreviewMath.swift tests/PreviewGeometryTests.swift -o "$RUNNER_TEMP/check-preview"
           "$RUNNER_TEMP/check-preview"
+          xcrun swiftc QuietShot/Views/DuoCaptureControls.swift tests/DuoCaptureControlsTests.swift -o "$RUNNER_TEMP/check-controls"
+          "$RUNNER_TEMP/check-controls"
 
       - name: Archive (unsigned)
         run: |

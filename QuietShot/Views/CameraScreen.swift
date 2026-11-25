@@ -193,19 +193,16 @@ private struct CameraContent: View {
     @ViewBuilder
     private var runningContent: some View {
         let fold = regions.fold
-        let persistentControls = duoClosed || fold != nil || innerDisplay
         let previewLandscape: Bool = {
             guard !duoClosed, let fold else { return landscape }
             return fold.width >= fold.height ? size.width > fold.minY : fold.minX > size.height
         }()
 
         ZStack {
-            if duoClosed {
-                closedDuoLayout
-            } else if let fold {
+            if !duoClosed, let fold {
                 foldedLayout(fold: fold, size: size)
-            } else if innerDisplay {
-                innerDisplayLayout(landscape: landscape)
+            } else if duoClosed || innerDisplay {
+                duoLayout
             } else if landscape {
                 landscapeLayout
                     .padding(regions.occlusionInsets(in: size))
@@ -221,66 +218,54 @@ private struct CameraContent: View {
         .modifier(OuterDisplayAccessory(camera: camera, isEnabled: $outerPreviewEnabled, isAvailable: $outerPreviewAvailable))
         .onAppear { camera.setInterfaceLandscape(previewLandscape) }
         .onChange(of: previewLandscape) { _, value in camera.setInterfaceLandscape(value) }
-        .onChange(of: persistentControls, initial: true) { _, persistent in
-            if persistent { drawerOpen = false }
-        }
     }
 
-    /// 바깥 화면은 촬영 비율을 먼저 맞추고 오른쪽 여백이 모자라면 조작 열을 미리보기 위에 얹는다.
-    private var closedDuoLayout: some View {
+    private var duoLayout: some View {
         let railWidth: CGFloat = 96
-        let rail = CGRect(x: size.width - railWidth, y: 0, width: railWidth, height: size.height)
-        return ZStack(alignment: .trailing) {
+        let insets = regions.occlusionInsets(in: size)
+        return ZStack {
             GeometryReader { viewport in
-                let padding = FramePreviewMath.trailingPadding(
-                    viewport: viewport.size, aspect: previewAspect(landscape: landscape),
-                    railWidth: railWidth, safeAreaInset: trailingSafeAreaInset
-                )
-                previewArea(landscape: landscape, persistentControls: true)
+                let padding = landscape ? FramePreviewMath.trailingPadding(
+                    viewport: viewport.size, aspect: previewAspect(landscape: true),
+                    railWidth: railWidth, safeAreaInset: trailingSafeAreaInset + insets.trailing
+                ) : 0
+                previewArea(landscape: landscape, separateControls: true)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(.trailing, padding)
             }
             .ignoresSafeArea(.container, edges: .horizontal)
 
+            DuoCaptureControls(
+                landscape: landscape, railWidth: railWidth,
+                tools: duoTools, lenses: zoomControl, modes: modeSelector,
+                shutter: shutter, gallery: galleryControl, flip: flipControl
+            )
+            .padding(insets)
+            .background(alignment: .bottom) {
+                LinearGradient(colors: [.clear, .black.opacity(0.72)], startPoint: .top, endPoint: .bottom)
+                    .frame(height: landscape ? 96 : 184)
+                    .allowsHitTesting(false)
+            }
+            .background(alignment: .top) {
+                LinearGradient(colors: [.black.opacity(0.5), .clear], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 68)
+                    .allowsHitTesting(false)
+            }
+            .opacity(camera.isSystemControlFullscreen ? 0 : 1)
+        }
+        .frame(width: size.width, height: size.height)
+    }
+
+    private var duoTools: some View {
+        VStack(spacing: 6) {
             HStack(spacing: 6) {
-                if drawerOpen {
-                    ViewThatFits(in: .vertical) {
-                        closedDuoOptions
-                        ScrollView { closedDuoOptions }
-                    }
-                }
-                ViewThatFits(in: .vertical) {
-                    closedDuoRail
-                    ScrollView { closedDuoRail }
-                }
-                .frame(width: railWidth)
+                torchButton
+                Spacer(minLength: 0)
+                captureStatus
+                Spacer(minLength: 0)
+                statusPill(vertical: false)
             }
-            .padding(regions.railInsets(in: rail))
-            .padding(.vertical, 8)
-        }
-    }
-
-    private var closedDuoOptions: some View {
-        VStack(alignment: .trailing, spacing: 8) {
-            quickControls(vertical: true)
-            zoomControl
-        }
-    }
-
-    private var closedDuoRail: some View {
-        VStack(spacing: 8) {
-            torchButton
-            CircleIconButton(systemName: "gearshape.fill", size: 44, action: openSettings)
-                .rotationEffect(iconAngle)
-                .accessibilityLabel("설정")
-            CircleIconButton(systemName: "slider.horizontal.3", size: 44,
-                             tint: drawerOpen ? .black : .white,
-                             background: drawerOpen ? Theme.accent : Theme.chip) {
-                withAnimation { drawerOpen.toggle() }
-            }
-            .rotationEffect(iconAngle)
-            .accessibilityLabel(drawerOpen ? "빠른 옵션 닫기" : "빠른 옵션 열기")
-            bottomControls(vertical: true)
+            if drawerOpen { quickControls }
         }
     }
 
@@ -309,111 +294,64 @@ private struct CameraContent: View {
         if hingeClosed != nil { showDuoSettings = true } else { showSettings = true }
     }
 
-    /// 반쯤 접힘(탁상·책 모드): 접는 선을 기준으로 한쪽은 미리보기, 다른 쪽은 조작부. 접는 선 위에는 아무것도 두지 않음
+    /// 접는 선을 넘지 않도록 미리보기와 셔터에 각각 독립된 영역을 준다.
     @ViewBuilder
     private func foldedLayout(fold: CGRect, size: CGSize) -> some View {
         if fold.width >= fold.height {
-            // 가로 접는 선(탁상 모드): 위 = 미리보기, 아래 = 조작부
+            let preview = CGRect(x: 0, y: 0, width: size.width, height: fold.minY)
+            let controls = CGRect(x: 0, y: fold.maxY, width: size.width, height: size.height - fold.maxY)
             VStack(spacing: 0) {
-                previewArea(landscape: size.width > fold.minY, persistentControls: true)
-                    .padding(.top, 8)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: max(fold.minY, 0))
+                foldedPreview(in: preview)
                 Color.clear.frame(height: fold.height)
-                foldControls(horizontalFold: true)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: max(size.height - fold.maxY, 0))
+                foldedControls(in: controls, landscape: false)
             }
         } else {
-            // 세로 접는 선(책 모드): 왼쪽 = 미리보기, 오른쪽 = 조작부
+            let preview = CGRect(x: 0, y: 0, width: fold.minX, height: size.height)
+            let controls = CGRect(x: fold.maxX, y: 0, width: size.width - fold.maxX, height: size.height)
             HStack(spacing: 0) {
-                previewArea(landscape: fold.minX > size.height, persistentControls: true)
-                    .padding(.leading, 8)
-                    .frame(maxHeight: .infinity)
-                    .frame(width: max(fold.minX, 0))
+                foldedPreview(in: preview)
                 Color.clear.frame(width: fold.width)
-                foldControls(horizontalFold: false)
-                    .frame(maxHeight: .infinity)
-                    .frame(width: max(size.width - fold.maxX, 0))
+                foldedControls(in: controls, landscape: true)
             }
         }
     }
 
-    /// 접은 화면 아래쪽(또는 오른쪽) 조작부: 큰 셔터, 썸네일·전환, 항상 펼쳐진 빠른 설정
-    private func foldControls(horizontalFold: Bool) -> some View {
-        VStack(spacing: 14) {
-            HStack {
-                torchButton
-                Spacer()
-                Label(horizontalFold ? "탁상 모드" : "책 모드", systemImage: horizontalFold ? "laptopcomputer" : "book")
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Theme.accent)
-                Spacer()
-                statusPill(vertical: false, persistentControls: true)
+    private func foldedPreview(in pane: CGRect) -> some View {
+        let insets = regions.occlusionInsets(in: pane)
+        return previewArea(landscape: pane.width > pane.height, separateControls: true)
+            .frame(width: pane.width, height: pane.height)
+            .overlay(alignment: .top) {
+                duoTools
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                    .padding(insets)
+                    .opacity(camera.isSystemControlFullscreen ? 0 : 1)
             }
-            Spacer(minLength: 0)
-            bottomControls(vertical: false)
-                .scaleEffect(1.12)
-                .padding(.horizontal, 20)
-            Spacer(minLength: 0)
-            quickControls(vertical: false)
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
+            .overlay(alignment: .bottom) {
+                zoomControl
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 8)
+                    .padding(insets)
+            }
+            .clipped()
     }
 
-    /// 펼친 안쪽 화면: 큰 미리보기 + 항상 보이는 빠른 설정 패널
-    @ViewBuilder
-    private func innerDisplayLayout(landscape: Bool) -> some View {
-        if landscape {
-            let toolsWidth: CGFloat = 92
-            let shutterWidth: CGFloat = 120
-            HStack(spacing: 0) {
-                VStack(spacing: 16) {
-                    torchButton
-                    Spacer(minLength: 0)
-                    ViewThatFits(in: .vertical) {
-                        quickControls(vertical: true)
-                        ScrollView { quickControls(vertical: true) }
-                    }
-                    Spacer(minLength: 0)
-                }
-                .padding(.vertical, 20)
-                .padding(regions.railInsets(in: CGRect(x: 0, y: 0, width: toolsWidth, height: size.height)))
-                .frame(width: toolsWidth)
-                previewArea(landscape: true, persistentControls: true)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                VStack(spacing: 14) {
-                    statusPill(vertical: false, persistentControls: true)
-                    bottomControls(vertical: true)
-                }
-                .padding(.vertical, 24)
-                .padding(regions.railInsets(in: CGRect(x: size.width - shutterWidth, y: 0, width: shutterWidth, height: size.height)))
-                .frame(width: shutterWidth)
-            }
-        } else {
-            VStack(spacing: 10) {
-                HStack(alignment: .center) {
-                    torchButton
-                    Spacer()
-                    quickControls(vertical: false)
-                    Spacer()
-                    statusPill(vertical: false, persistentControls: true)
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 8)
-                previewArea(landscape: false, persistentControls: true)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                bottomControls(vertical: false)
-                    .scaleEffect(1.1)
-                    .padding(.horizontal, 48)
-                    .padding(.bottom, 18)
-            }
-            .padding(regions.occlusionInsets(in: size))
-        }
+    private func foldedControls(in pane: CGRect, landscape: Bool) -> some View {
+        let insets = regions.occlusionInsets(in: pane)
+        // 좁은 책 모드에서는 모드 선택과 셔터가 겹치지 않게 하단 바를 쓴다.
+        let sideRail = landscape && pane.width - insets.leading - insets.trailing >= 250
+        return DuoCaptureControls(
+            landscape: sideRail, railWidth: 96,
+            tools: EmptyView(), lenses: EmptyView(), modes: modeSelector,
+            shutter: shutter, gallery: galleryControl, flip: flipControl
+        )
+        .padding(insets)
+        .frame(width: pane.width, height: pane.height)
+        .clipped()
+        .opacity(camera.isSystemControlFullscreen ? 0 : 1)
     }
 
-    private func quickControls(vertical: Bool) -> some View {
+    private var quickControls: some View {
         QuickControls(
             camera: camera,
             aspectRatio: $aspectRatio,
@@ -422,8 +360,6 @@ private struct CameraContent: View {
             saveFormat: $saveFormat,
             iconAngle: iconAngle,
             outerPreview: outerPreviewAvailable ? $outerPreviewEnabled : nil,
-            vertical: vertical,
-            includesSettings: !duoClosed,
             onOpenSettings: openSettings
         )
         .id(camera.captureMode)
@@ -473,9 +409,8 @@ private struct CameraContent: View {
     }
 
     /// 무음 표시 + 해상도 + 빠른 설정 열기
-    private func statusPill(vertical: Bool, persistentControls: Bool = false) -> some View {
+    private func statusPill(vertical: Bool) -> some View {
         Button {
-            guard !persistentControls else { return }
             Haptics.selection()
             withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) { drawerOpen.toggle() }
         } label: {
@@ -492,11 +427,9 @@ private struct CameraContent: View {
                     Text("\(captureTimer.rawValue)")
                         .monospacedDigit()
                 }
-                if !persistentControls {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 10, weight: .bold))
-                        .rotationEffect(.degrees(drawerOpen ? 180 : 0))
-                }
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .bold))
+                    .rotationEffect(.degrees(drawerOpen ? 180 : 0))
             }
             .font(.system(size: 13, weight: .semibold, design: .rounded))
             .foregroundStyle(drawerOpen ? Color.black : Color.white)
@@ -520,7 +453,7 @@ private struct CameraContent: View {
         return landscape ? 1 / portraitAspect : portraitAspect
     }
 
-    private func previewArea(landscape: Bool, persistentControls: Bool = false) -> some View {
+    private func previewArea(landscape: Bool, separateControls: Bool = false) -> some View {
         GeometryReader { proxy in
             ZStack {
                 Color.black
@@ -532,7 +465,7 @@ private struct CameraContent: View {
                         onTap: handleTap,
                         onLongPress: handleLongPress,
                         onPinch: handlePinch,
-                        onPan: { handlePan($0, $1, persistentControls: persistentControls) }
+                        onPan: handlePan
                     )
                     .id(source.id)
                     .transition(.identity)
@@ -565,9 +498,11 @@ private struct CameraContent: View {
                 Color.black.opacity(flashOpacity).allowsHitTesting(false)
             }
             .overlay { countdownView }
-            .overlay(alignment: .top) { topOverlay(persistentControls: persistentControls) }
+            .overlay(alignment: .top) {
+                if !separateControls { topOverlay }
+            }
             .overlay(alignment: .bottom) {
-                if !duoClosed {
+                if !separateControls {
                     zoomControl.padding(.horizontal, 24).padding(.bottom, 12)
                 }
             }
@@ -579,14 +514,22 @@ private struct CameraContent: View {
         .onChange(of: camera.captureTick) { _, _ in flashCapture() }
     }
 
-    private func topOverlay(persistentControls: Bool) -> some View {
+    private var topOverlay: some View {
         VStack(spacing: 8) {
+            captureStatus
+            if drawerOpen {
+                quickControls
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .padding(.top, 10)
+        .animation(.spring(response: 0.32, dampingFraction: 0.85), value: drawerOpen)
+    }
+
+    private var captureStatus: some View {
+        VStack(spacing: 4) {
             if camera.captureMode == .video && (camera.recordingState != .idle || !camera.recordsAudio) {
                 recordingBadge
-            }
-            if drawerOpen && !persistentControls {
-                quickControls(vertical: false)
-                    .transition(.move(edge: .top).combined(with: .opacity))
             }
             if camera.isFocusLocked {
                 Text("AE/AF 잠금")
@@ -598,8 +541,6 @@ private struct CameraContent: View {
                     .transition(.opacity)
             }
         }
-        .padding(.top, 10)
-        .animation(.spring(response: 0.32, dampingFraction: 0.85), value: drawerOpen)
         .animation(.easeOut(duration: 0.2), value: camera.isFocusLocked)
     }
 
@@ -610,6 +551,7 @@ private struct CameraContent: View {
                 configuration: camera.zoom,
                 displayZoom: camera.displayZoom,
                 iconAngle: iconAngle,
+                showsFixedZoom: duoClosed || innerDisplay || regions.fold != nil,
                 onSelect: { camera.selectZoomPreset($0) },
                 onContinuousZoom: { camera.setZoom(display: $0) }
             )
@@ -716,35 +658,36 @@ private struct CameraContent: View {
         }
     }
 
-    @ViewBuilder
-    private func bottomControls(vertical: Bool) -> some View {
-        let thumbnail = thumbnailButton
-            .rotationEffect(iconAngle)
-        let flip = CircleIconButton(systemName: "arrow.triangle.2.circlepath", size: 52, action: flipCamera)
+    private var galleryControl: some View { thumbnailButton.rotationEffect(iconAngle) }
+
+    private var flipControl: some View {
+        CircleIconButton(systemName: "arrow.triangle.2.circlepath", size: 52, action: flipCamera)
             .rotationEffect(.degrees(flipButtonAngle))
             .rotationEffect(iconAngle)
             .accessibilityLabel("전면/후면 전환")
             .disabled(camera.recordingState != .idle || camera.isChangingMode)
+    }
 
+    private func bottomControls(vertical: Bool) -> some View {
         Group {
             if vertical {
                 VStack {
-                    flip
+                    flipControl
                     Spacer(minLength: 0)
                     modeSelector
                     shutter
                     Spacer(minLength: 0)
-                    thumbnail
+                    galleryControl
                 }
             } else {
                 VStack(spacing: 8) {
                     modeSelector
                     HStack {
-                        thumbnail
+                        galleryControl
                         Spacer()
                         shutter
                         Spacer()
-                        flip
+                        flipControl
                     }
                 }
             }
@@ -843,7 +786,7 @@ private struct CameraContent: View {
     }
 
     /// 초점 표시가 있으면 위아래 드래그 = 노출 보정, 없으면 위로 = 빠른 설정 열기 / 아래로 = 닫기
-    private func handlePan(_ state: UIGestureRecognizer.State, _ translation: CGSize, persistentControls: Bool) {
+    private func handlePan(_ state: UIGestureRecognizer.State, _ translation: CGSize) {
         switch state {
         case .began:
             exposureDragStart = focus != nil ? camera.exposureBias : nil
@@ -856,7 +799,7 @@ private struct CameraContent: View {
                 camera.setExposureBias(start - Float(translation.height / 110))
             }
         default:
-            if exposureDragStart == nil, !persistentControls, abs(translation.height) > abs(translation.width) {
+            if exposureDragStart == nil, abs(translation.height) > abs(translation.width) {
                 if translation.height < -40 {
                     withAnimation { drawerOpen = true }
                 } else if translation.height > 40 {

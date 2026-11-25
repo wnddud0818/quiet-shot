@@ -7,6 +7,7 @@ struct ZoomControl: View {
     let configuration: ZoomConfiguration
     let displayZoom: CGFloat
     let iconAngle: Angle
+    var showsFixedZoom = false
     let onSelect: (ZoomPreset) -> Void
     let onContinuousZoom: (CGFloat) -> Void
 
@@ -68,6 +69,13 @@ struct ZoomControl: View {
             .background(Capsule().fill(Theme.glass))
             .contentShape(Capsule())
             .simultaneousGesture(dialDrag)
+        } else if showsFixedZoom {
+            chip(title: ZoomPreset.format(displayZoom) + "×", selected: true)
+                .padding(4)
+                .background(Capsule().fill(Theme.glass))
+                .accessibilityLabel("고정 화각")
+                .accessibilityValue("\(ZoomPreset.format(displayZoom))배")
+                .allowsHitTesting(false)
         }
     }
 
