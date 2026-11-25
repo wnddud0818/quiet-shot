@@ -12,8 +12,41 @@ enum SettingsKey {
     static let saveLocation = "saveLocation"
     static let aspectRatio = "aspectRatio"
     static let captureTimer = "captureTimer"
+    static let movieQuality = "movieQuality"
+    static let movieMicrophone = "movieMicrophone"
     /// 전면 카메라를 "넓게(0.8×)"로 쓸지 (false면 표준 1×)
     static let frontWideFraming = "frontWideFraming"
+}
+
+enum MovieQuality: String, CaseIterable {
+    case hd30, hd60, uhd30, uhd60
+
+    enum Resolution: String, CaseIterable {
+        case hd = "1080p"
+        case uhd = "4K"
+
+        init?(width: Int32, height: Int32) {
+            switch (max(width, height), min(width, height)) {
+            case (1920, 1080): self = .hd
+            case (3840, 2160): self = .uhd
+            default: return nil
+            }
+        }
+    }
+
+    var resolution: Resolution { self == .hd30 || self == .hd60 ? .hd : .uhd }
+    var fps: Int32 { self == .hd30 || self == .uhd30 ? 30 : 60 }
+
+    static var preferred: Self {
+        UserDefaults.standard.string(forKey: SettingsKey.movieQuality).flatMap(Self.init(rawValue:)) ?? .hd30
+    }
+
+    /// 렌즈를 바꿀 때는 선호 해상도를 우선하고, 지원 기기로 돌아오면 원래 조합을 복원한다.
+    static func bestMatch(in available: [Self], resolution: Resolution, fps: Int32) -> Self? {
+        let sameResolution = available.filter { $0.resolution == resolution }
+        return sameResolution.first { $0.fps == fps } ?? sameResolution.first
+            ?? available.first { $0.fps == fps } ?? available.first
+    }
 }
 
 /// 셀프 타이머 (소리 없이 화면 카운트다운만)

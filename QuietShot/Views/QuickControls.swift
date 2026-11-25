@@ -3,16 +3,17 @@ import SwiftUI
 /// 상단 배지를 누르거나 미리보기를 위로 쓸어 올리면 나타나는 빠른 설정 줄.
 /// 항목을 누르면 그 자리에서 선택지가 펼쳐집니다.
 struct QuickControls: View {
+    @ObservedObject var camera: CameraController
     @Binding var aspectRatio: AspectRatioOption
     @Binding var captureTimer: CaptureTimer
     @Binding var showGrid: Bool
     @Binding var saveFormat: SaveFormat
-    let megapixelText: (AspectRatioOption) -> String
     let iconAngle: Angle
     /// iPhone Duo 바깥 화면 미리보기 (사용할 수 없으면 nil → 버튼 숨김)
     var outerPreview: Binding<Bool>? = nil
     /// 세로로 세우기 (안쪽 화면 옆 패널용)
     var vertical = false
+    var includesSettings = true
     let onOpenSettings: () -> Void
 
     private enum Expanded { case ratio, timer }
@@ -44,7 +45,7 @@ struct QuickControls: View {
 
     private var ratioOptions: [Option] {
         AspectRatioOption.allCases.map { option in
-            Option(id: option.title, detail: megapixelText(option), selected: option == aspectRatio) {
+            Option(id: option.title, detail: camera.megapixelText(for: option), selected: option == aspectRatio) {
                 aspectRatio = option
             }
         }
@@ -60,24 +61,30 @@ struct QuickControls: View {
 
     private var mainRow: some View {
         stack {
-            item(icon: "aspectratio", caption: aspectRatio.title, active: aspectRatio != .fourThree) {
-                expanded = .ratio
-            }
-            item(icon: "timer", caption: captureTimer.title, active: captureTimer != .off) {
-                expanded = .timer
+            if camera.captureMode == .video {
+                MovieOptions(camera: camera, compact: true, iconAngle: iconAngle)
+            } else {
+                item(icon: "aspectratio", caption: aspectRatio.title, active: aspectRatio != .fourThree) {
+                    expanded = .ratio
+                }
+                item(icon: "timer", caption: captureTimer.title, active: captureTimer != .off) {
+                    expanded = .timer
+                }
             }
             item(icon: "grid", caption: "격자", active: showGrid) {
                 showGrid.toggle()
             }
-            item(icon: "photo", caption: saveFormat == .heic ? "HEIC" : "JPEG", active: false) {
-                saveFormat = saveFormat == .heic ? .jpeg : .heic
+            if camera.captureMode == .photo {
+                item(icon: "photo", caption: saveFormat == .heic ? "HEIC" : "JPEG", active: false) {
+                    saveFormat = saveFormat == .heic ? .jpeg : .heic
+                }
             }
             if let outerPreview {
                 item(icon: "rectangle.on.rectangle", caption: "바깥 화면", active: outerPreview.wrappedValue) {
                     outerPreview.wrappedValue.toggle()
                 }
             }
-            item(icon: "gearshape", caption: "설정", active: false, action: onOpenSettings)
+            if includesSettings { item(icon: "gearshape", caption: "설정", active: false, action: onOpenSettings) }
         }
     }
 
@@ -94,7 +101,7 @@ struct QuickControls: View {
                     .lineLimit(1)
             }
             .foregroundStyle(active ? Theme.accent : Color.white)
-            .frame(width: 52, height: 44)
+            .frame(width: 52, height: vertical ? 52 : 44)
             .contentShape(Rectangle())
             .rotationEffect(iconAngle)
         }

@@ -30,17 +30,31 @@ struct CameraScreen: View {
     @State private var countdownTask: Task<Void, Never>?
     @State private var hardwareHoldTask: Task<Void, Never>?
     @State private var hardwareBurst = false
-    @State private var interfaceAngle: Double = 0
+    @State private var hardwarePressMode: CameraController.CaptureMode?
+    @State private var interfaceOrientation: UIInterfaceOrientation = .unknown
 
     // iPhone Duo
+    @State private var hingeReading: Bool?
+    @State private var outerCameraFacesView: Bool?
+    @State private var innerOrientation: UIInterfaceOrientation?
+    @State private var showDuoSettings = false
     @State private var outerPreviewEnabled = true
     @State private var outerPreviewAvailable = false
 
     /// 셀프 타이머 남은 초 (바깥 화면과 공유)
     private var countdown: Int? { camera.countdown }
 
+    private var hingeClosed: Bool? { hingeReading ?? outerCameraFacesView }
+    private var duoClosed: Bool { hingeClosed == true }
+    private var lockedOrientation: UIInterfaceOrientation? {
+        guard let hingeClosed else { return nil }
+        return hingeClosed ? .portrait : innerOrientation
+    }
+
+    private var layoutAngle: Double { Self.angle(for: lockedOrientation ?? interfaceOrientation) }
+
     var body: some View {
-        GeometryReader { geometry in
+        DuoCameraViewport(compensation: layoutAngle - Self.angle(for: interfaceOrientation)) { geometry in
             let landscape = geometry.size.width > geometry.size.height
             ZStack {
                 Color.black.ignoresSafeArea()
@@ -59,10 +73,24 @@ struct CameraScreen: View {
         }
         .background {
             CameraWindowObserver(
-                onForwardFacingCamerasChange: camera.updateForwardFacingCameras,
-                onInterfaceOrientationChange: { interfaceAngle = Self.angle(for: $0) }
+                lockedOrientation: lockedOrientation,
+                onForwardFacingCamerasChange: { ids, outer in
+                    outerCameraFacesView = outer
+                    camera.updateForwardFacingCameras(ids)
+                },
+                onInterfaceOrientationChange: { orientation in
+                    interfaceOrientation = orientation
+                    if hingeClosed == false, innerOrientation == nil { innerOrientation = orientation }
+                }
             )
             .allowsHitTesting(false)
+        }
+        .modifier(DuoHingeObserver(isClosed: $hingeReading))
+        .onChange(of: hingeClosed) { _, closed in
+            innerOrientation = closed == false && interfaceOrientation != .unknown ? interfaceOrientation : nil
+            drawerOpen = false
+            showSettings = false
+            showDuoSettings = false
         }
         .statusBarHidden()
         .persistentSystemOverlays(.hidden)
@@ -77,6 +105,8 @@ struct CameraScreen: View {
             } else {
                 camera.stopBurst()
                 cancelCountdown()
+                cancelHardwareHold()
+                if phase == .background { camera.stopRecording() }
             }
             updateLocationUpdates()
         }
@@ -123,7 +153,7 @@ struct CameraScreen: View {
                 Spacer()
                 statusPill(vertical: true)
                 Spacer()
-                CircleIconButton(systemName: "gearshape.fill") { showSettings = true }
+                CircleIconButton(systemName: "gearshape.fill", action: openSettings)
                     .rotationEffect(iconAngle)
             }
             .padding(.vertical, 20)
@@ -143,16 +173,20 @@ struct CameraScreen: View {
         let size = geometry.size
         let regions = DuoRegions.read(geometry)
         let fold = regions.fold
-        let innerDisplay = regions.hasDivision || outerPreviewAvailable
+        let innerDisplay = hingeClosed == false || regions.hasDivision || outerPreviewAvailable
             || (horizontalSizeClass == .regular && verticalSizeClass == .regular)
-        let persistentControls = fold != nil || innerDisplay
+        let persistentControls = duoClosed || fold != nil || innerDisplay
         let previewLandscape: Bool = {
+            if duoClosed { return false }
             guard let fold else { return landscape }
             return fold.width >= fold.height ? size.width > fold.minY : fold.minX > size.height
         }()
 
         ZStack {
-            if let fold {
+            if duoClosed {
+                closedDuoLayout
+                    .padding(regions.occlusionInsets(in: size))
+            } else if let fold {
                 foldedLayout(fold: fold, size: size)
             } else if innerDisplay {
                 innerDisplayLayout(landscape: landscape)
@@ -165,12 +199,88 @@ struct CameraScreen: View {
                     .padding(regions.occlusionInsets(in: size))
             }
         }
+        .accessibilityHidden(showDuoSettings)
+        .overlay(alignment: .trailing) {
+            duoSettingsPanel(regions: regions, size: size)
+        }
         .modifier(OuterDisplayAccessory(camera: camera, isEnabled: $outerPreviewEnabled, isAvailable: $outerPreviewAvailable))
         .onAppear { camera.setInterfaceLandscape(previewLandscape) }
         .onChange(of: previewLandscape) { _, value in camera.setInterfaceLandscape(value) }
         .onChange(of: persistentControls, initial: true) { _, persistent in
             if persistent { drawerOpen = false }
         }
+    }
+
+    /// 닫힌 바깥 화면. 기기를 돌려도 미리보기와 오른쪽 조작 열의 위치는 고정한다.
+    private var closedDuoLayout: some View {
+        HStack(spacing: 0) {
+            previewArea(landscape: false, persistentControls: true)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay(alignment: .trailing) {
+                    if drawerOpen {
+                        ViewThatFits(in: .vertical) {
+                            closedDuoOptions
+                            ScrollView { closedDuoOptions }
+                        }
+                        .padding(.trailing, 6)
+                    }
+                }
+            ViewThatFits(in: .vertical) {
+                closedDuoRail
+                ScrollView { closedDuoRail }
+            }
+            .frame(width: 96)
+            .padding(.vertical, 8)
+        }
+    }
+
+    private var closedDuoOptions: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            quickControls(vertical: true)
+            zoomControl
+        }
+    }
+
+    private var closedDuoRail: some View {
+        VStack(spacing: 8) {
+            torchButton
+            CircleIconButton(systemName: "gearshape.fill", size: 44, action: openSettings)
+                .rotationEffect(iconAngle)
+                .accessibilityLabel("설정")
+            CircleIconButton(systemName: "slider.horizontal.3", size: 44,
+                             tint: drawerOpen ? .black : .white,
+                             background: drawerOpen ? Theme.accent : Theme.chip) {
+                withAnimation { drawerOpen.toggle() }
+            }
+            .rotationEffect(iconAngle)
+            .accessibilityLabel(drawerOpen ? "빠른 옵션 닫기" : "빠른 옵션 열기")
+            bottomControls(vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private func duoSettingsPanel(regions: DuoRegions, size: CGSize) -> some View {
+        if showDuoSettings {
+            let fold = regions.fold
+            let verticalFold = fold.map { $0.width < $0.height } ?? false
+            let width = verticalFold ? size.width - (fold?.maxX ?? 0) : size.width * 0.9
+            let top = verticalFold ? 0 : fold?.maxY ?? 0
+            ZStack(alignment: .bottomTrailing) {
+                Color.black.opacity(0.45)
+                    .onTapGesture { showDuoSettings = false }
+                SettingsView(camera: camera, onDone: { showDuoSettings = false })
+                    .padding(regions.occlusionInsets(in: size))
+                    .frame(width: min(360, width))
+                    .padding(.top, top)
+            }
+            .accessibilityAddTraits(.isModal)
+        }
+    }
+
+    private func openSettings() {
+        cancelHardwareHold()
+        drawerOpen = false
+        if hingeClosed != nil { showDuoSettings = true } else { showSettings = true }
     }
 
     /// 반쯤 접힘(탁상·책 모드): 접는 선을 기준으로 한쪽은 미리보기, 다른 쪽은 조작부. 접는 선 위에는 아무것도 두지 않음
@@ -234,7 +344,10 @@ struct CameraScreen: View {
                 VStack(spacing: 16) {
                     torchButton
                     Spacer(minLength: 0)
-                    quickControls(vertical: true)
+                    ViewThatFits(in: .vertical) {
+                        quickControls(vertical: true)
+                        ScrollView { quickControls(vertical: true) }
+                    }
                     Spacer(minLength: 0)
                 }
                 .padding(.vertical, 20)
@@ -273,20 +386,22 @@ struct CameraScreen: View {
 
     private func quickControls(vertical: Bool) -> some View {
         QuickControls(
+            camera: camera,
             aspectRatio: $aspectRatio,
             captureTimer: $captureTimer,
             showGrid: $showGrid,
             saveFormat: $saveFormat,
-            megapixelText: { camera.megapixelText(for: $0) },
             iconAngle: iconAngle,
             outerPreview: outerPreviewAvailable ? $outerPreviewEnabled : nil,
             vertical: vertical,
-            onOpenSettings: { showSettings = true }
+            includesSettings: !duoClosed,
+            onOpenSettings: openSettings
         )
+        .id(camera.captureMode)
     }
 
     private var iconAngle: Angle {
-        var angle = orientation.iconRotation - interfaceAngle
+        var angle = orientation.iconRotation - layoutAngle
         if angle > 180 { angle -= 360 }
         if angle <= -180 { angle += 360 }
         return .degrees(angle)
@@ -300,7 +415,7 @@ struct CameraScreen: View {
             Spacer()
             statusPill(vertical: false)
             Spacer()
-            CircleIconButton(systemName: "gearshape.fill") { showSettings = true }
+            CircleIconButton(systemName: "gearshape.fill", action: openSettings)
                 .rotationEffect(iconAngle)
                 .accessibilityLabel("설정")
         }
@@ -312,6 +427,7 @@ struct CameraScreen: View {
         if camera.torchAvailable {
             CircleIconButton(
                 systemName: camera.torchOn ? "flashlight.on.fill" : "flashlight.off.fill",
+                size: duoClosed ? 44 : 40,
                 tint: camera.torchOn ? .black : .white,
                 background: camera.torchOn ? Theme.accent : Theme.chip
             ) {
@@ -333,10 +449,14 @@ struct CameraScreen: View {
             withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) { drawerOpen.toggle() }
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: "speaker.slash.fill")
-                Text(camera.megapixelText(for: aspectRatio))
-                    .monospacedDigit()
-                if captureTimer != .off {
+                if camera.captureMode == .video {
+                    Image(systemName: "video.fill")
+                    Text("동영상")
+                } else {
+                    Image(systemName: "speaker.slash.fill")
+                    Text(camera.megapixelText(for: aspectRatio)).monospacedDigit()
+                }
+                if camera.captureMode == .photo, captureTimer != .off {
                     Image(systemName: "timer")
                     Text("\(captureTimer.rawValue)")
                         .monospacedDigit()
@@ -357,13 +477,16 @@ struct CameraScreen: View {
             .frame(width: vertical ? 40 : nil, height: vertical ? 180 : nil)
         }
         .buttonStyle(PressableStyle())
-        .accessibilityLabel("무음 촬영, \(camera.resolutionText(for: aspectRatio)). 빠른 설정")
+        .accessibilityLabel(camera.captureMode == .video ? "동영상 빠른 설정" : "무음 촬영, \(camera.resolutionText(for: aspectRatio)). 빠른 설정")
     }
 
     // MARK: - 미리보기
 
     private func previewArea(landscape: Bool, persistentControls: Bool = false) -> some View {
-        let ratio = landscape ? 1 / aspectRatio.portraitAspect : aspectRatio.portraitAspect
+        let frame = camera.previewFrameSize
+        let movieAspect = frame.width > 0 && frame.height > 0 ? min(frame.width, frame.height) / max(frame.width, frame.height) : 9.0 / 16.0
+        let portraitAspect = camera.captureMode == .video ? movieAspect : aspectRatio.portraitAspect
+        let ratio = landscape ? 1 / portraitAspect : portraitAspect
         return GeometryReader { proxy in
             ZStack {
                 Color.black
@@ -380,6 +503,7 @@ struct CameraScreen: View {
                     )
                     .id(source.id)
                     .transition(.identity)
+                    .onDisappear { cancelHardwareHold() }
                 }
             }
             .overlay {
@@ -409,7 +533,11 @@ struct CameraScreen: View {
             }
             .overlay { countdownView }
             .overlay(alignment: .top) { topOverlay(persistentControls: persistentControls) }
-            .overlay(alignment: .bottom) { zoomOverlay }
+            .overlay(alignment: .bottom) {
+                if !duoClosed {
+                    zoomControl.padding(.horizontal, 24).padding(.bottom, 12)
+                }
+            }
         }
         .aspectRatio(ratio, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: landscape ? 18 : 0, style: .continuous))
@@ -420,6 +548,9 @@ struct CameraScreen: View {
 
     private func topOverlay(persistentControls: Bool) -> some View {
         VStack(spacing: 8) {
+            if camera.captureMode == .video && (camera.recordingState != .idle || !camera.recordsAudio) {
+                recordingBadge
+            }
             if drawerOpen && !persistentControls {
                 quickControls(vertical: false)
                     .transition(.move(edge: .top).combined(with: .opacity))
@@ -440,7 +571,7 @@ struct CameraScreen: View {
     }
 
     @ViewBuilder
-    private var zoomOverlay: some View {
+    private var zoomControl: some View {
         if !camera.isSystemControlFullscreen && countdown == nil {
             ZoomControl(
                 configuration: camera.zoom,
@@ -449,8 +580,6 @@ struct CameraScreen: View {
                 onSelect: { camera.selectZoomPreset($0) },
                 onContinuousZoom: { camera.setZoom(display: $0) }
             )
-            .padding(.horizontal, 24)
-            .padding(.bottom, 12)
             .transition(.opacity)
         }
     }
@@ -472,41 +601,118 @@ struct CameraScreen: View {
     // MARK: - 하단
 
     @ViewBuilder
+    private var recordingBadge: some View {
+        HStack(spacing: 6) {
+            switch camera.recordingState {
+            case .starting: Text("녹화 준비 중")
+            case .recording(let start):
+                Circle().fill(.red).frame(width: 9, height: 9)
+                Text(start, style: .timer).fixedSize()
+                    .accessibilityLabel("녹화 시간")
+            case .finishing: Text("저장 중")
+            case .idle: EmptyView()
+            }
+            if !camera.recordsAudio {
+                Label("소리 없음", systemImage: "mic.slash.fill")
+            }
+        }
+        .font(.caption.bold().monospacedDigit())
+        .foregroundStyle(.white)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(Theme.glass))
+    }
+
+    private var modeSelector: some View {
+        HStack(spacing: 0) {
+            modeButton(.photo, label: "사진")
+            modeButton(.video, label: "동영상")
+        }
+        .background(Capsule().fill(Theme.chip))
+        .disabled(camera.recordingState != .idle || camera.isChangingMode || camera.isSwitchingCamera || camera.isBursting || countdown != nil)
+    }
+
+    private func modeButton(_ mode: CameraController.CaptureMode, label: String) -> some View {
+        let selected = camera.captureMode == mode
+        return Button {
+            cancelHardwareHold()
+            camera.setCaptureMode(mode)
+        } label: {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .fixedSize()
+                .rotationEffect(iconAngle)
+                .frame(width: 46, height: 44)
+                .foregroundStyle(selected ? Color.black : .white)
+                .background(Capsule().fill(selected ? Theme.accent : .clear))
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    @ViewBuilder
+    private var shutter: some View {
+        if camera.captureMode == .video {
+            Button(action: shutterTapped) {
+                ZStack {
+                    Circle().strokeBorder(.white, lineWidth: 4)
+                    if camera.recordingState == .idle {
+                        Circle().fill(.red).padding(7)
+                    } else {
+                        RoundedRectangle(cornerRadius: 6).fill(.red).frame(width: 30, height: 30)
+                    }
+                }
+                .frame(width: 78, height: 78)
+            }
+            .buttonStyle(PressableStyle())
+            .disabled(camera.recordingState == .finishing || camera.isChangingMode || camera.isSwitchingCamera)
+            .accessibilityLabel(camera.recordingState == .idle ? "녹화 시작" : "녹화 정지")
+        } else {
+            ShutterButton(
+                isBursting: camera.isBursting,
+                burstCount: camera.burstCount,
+                isCountingDown: countdown != nil,
+                onTap: shutterTapped,
+                onBurstStart: {
+                    Haptics.impact()
+                    camera.startBurst()
+                },
+                onBurstEnd: { camera.stopBurst() }
+            )
+            .disabled(camera.isChangingMode)
+        }
+    }
+
+    @ViewBuilder
     private func bottomControls(vertical: Bool) -> some View {
         let thumbnail = thumbnailButton
             .rotationEffect(iconAngle)
-        let shutter = ShutterButton(
-            isBursting: camera.isBursting,
-            burstCount: camera.burstCount,
-            isCountingDown: countdown != nil,
-            onTap: shutterTapped,
-            onBurstStart: {
-                Haptics.impact()
-                camera.startBurst()
-            },
-            onBurstEnd: { camera.stopBurst() }
-        )
         let flip = CircleIconButton(systemName: "arrow.triangle.2.circlepath", size: 52, action: flipCamera)
             .rotationEffect(.degrees(flipButtonAngle))
             .rotationEffect(iconAngle)
             .accessibilityLabel("전면/후면 전환")
+            .disabled(camera.recordingState != .idle || camera.isChangingMode)
 
         Group {
             if vertical {
                 VStack {
                     flip
-                    Spacer()
+                    Spacer(minLength: 0)
+                    modeSelector
                     shutter
-                    Spacer()
+                    Spacer(minLength: 0)
                     thumbnail
                 }
             } else {
-                HStack {
-                    thumbnail
-                    Spacer()
-                    shutter
-                    Spacer()
-                    flip
+                VStack(spacing: 8) {
+                    modeSelector
+                    HStack {
+                        thumbnail
+                        Spacer()
+                        shutter
+                        Spacer()
+                        flip
+                    }
                 }
             }
         }
@@ -539,6 +745,7 @@ struct CameraScreen: View {
             .scaleEffect(thumbnailScale)
         }
         .buttonStyle(PressableStyle())
+        .disabled(camera.recordingState != .idle)
         .accessibilityLabel("사진 앱 열기")
     }
 
@@ -643,6 +850,11 @@ struct CameraScreen: View {
     // MARK: - 셔터 / 타이머 / 하드웨어 버튼
 
     private func shutterTapped() {
+        guard !camera.isChangingMode, !camera.isSwitchingCamera else { return }
+        if camera.captureMode == .video {
+            if camera.recordingState == .idle { camera.startRecording() } else { camera.stopRecording() }
+            return
+        }
         if countdownTask != nil {
             cancelCountdown()
             return
@@ -678,10 +890,15 @@ struct CameraScreen: View {
 
     /// 볼륨 버튼 / 카메라 제어 버튼: 누르고 떼면 촬영, 길게 누르면 연속 촬영
     private func handleHardwareShutter(_ phase: HardwareShutterPhase) {
-        guard !showSettings else { return }
+        guard !showSettings, !showDuoSettings, !camera.isChangingMode, scenePhase == .active else {
+            cancelHardwareHold()
+            return
+        }
         switch phase {
         case .began:
-            hardwareHoldTask?.cancel()
+            cancelHardwareHold()
+            hardwarePressMode = camera.captureMode
+            guard camera.captureMode == .photo else { return }
             hardwareHoldTask = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 450_000_000)
                 guard !Task.isCancelled, countdown == nil else { return }
@@ -690,22 +907,20 @@ struct CameraScreen: View {
                 camera.startBurst()
             }
         case .ended:
-            hardwareHoldTask?.cancel()
-            hardwareHoldTask = nil
-            if hardwareBurst {
-                hardwareBurst = false
-                camera.stopBurst()
-            } else {
-                shutterTapped()
-            }
+            let takeShot = hardwarePressMode == camera.captureMode && !hardwareBurst
+            cancelHardwareHold()
+            if takeShot { shutterTapped() }
         case .cancelled:
-            hardwareHoldTask?.cancel()
-            hardwareHoldTask = nil
-            if hardwareBurst {
-                hardwareBurst = false
-                camera.stopBurst()
-            }
+            cancelHardwareHold()
         }
+    }
+
+    private func cancelHardwareHold() {
+        hardwarePressMode = nil
+        hardwareHoldTask?.cancel()
+        hardwareHoldTask = nil
+        if hardwareBurst { camera.stopBurst() }
+        hardwareBurst = false
     }
 
     // MARK: - 애니메이션
