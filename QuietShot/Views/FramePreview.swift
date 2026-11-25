@@ -76,55 +76,15 @@ final class FramePreviewView: UIView {
 
     /// 화면 좌표 → 초점/노출 관심 지점 (센서 기준 0~1)
     func devicePoint(for point: CGPoint) -> CGPoint {
-        FramePreviewMath.devicePoint(
-            viewPoint: point,
+        guard let transform = FramePreviewMath.deviceToViewTransform(
             viewSize: bounds.size,
             bufferSize: bufferSize,
             rotationQuarters: FramePreviewMath.quarterTurns(rotationAngle),
             mirrored: mirrored,
             connectionQuarters: FramePreviewMath.quarterTurns(source.connectionAngle)
-        )
-    }
-}
-
-/// 미리보기 회전·반전·화면 채우기 계산 (순수 함수)
-enum FramePreviewMath {
-
-    static func quarterTurns(_ angle: CGFloat) -> Int {
-        var normalized = angle.truncatingRemainder(dividingBy: 360)
-        if normalized < 0 { normalized += 360 }
-        return Int((normalized / 90).rounded()) % 4
-    }
-
-    /// 화면의 한 점이 가리키는 센서 기준 좌표.
-    /// 화면 = 버퍼를 (화면 채우기) → 시계방향 회전 → 좌우 반전 한 것이므로 거꾸로 되돌립니다.
-    static func devicePoint(viewPoint: CGPoint,
-                            viewSize: CGSize,
-                            bufferSize: CGSize,
-                            rotationQuarters: Int,
-                            mirrored: Bool,
-                            connectionQuarters: Int) -> CGPoint {
-        guard viewSize.width > 0, viewSize.height > 0, bufferSize.width > 0, bufferSize.height > 0 else {
-            return CGPoint(x: 0.5, y: 0.5)
-        }
-        var dx = viewPoint.x - viewSize.width / 2
-        var dy = viewPoint.y - viewSize.height / 2
-        if mirrored { dx = -dx }
-        for _ in 0..<rotationQuarters {
-            (dx, dy) = (dy, -dx)   // 시계방향 90°의 역 = 반시계 90° (y축이 아래로 향하는 좌표계)
-        }
-        let layerSize = rotationQuarters % 2 == 1
-            ? CGSize(width: viewSize.height, height: viewSize.width)
-            : viewSize
-        let scale = max(layerSize.width / bufferSize.width, layerSize.height / bufferSize.height)
-        let imageWidth = bufferSize.width * scale
-        let imageHeight = bufferSize.height * scale
-        var x = min(max((dx + imageWidth / 2) / imageWidth, 0), 1)
-        var y = min(max((dy + imageHeight / 2) / imageHeight, 0), 1)
-        for _ in 0..<connectionQuarters {
-            (x, y) = (y, 1 - x)    // 커넥션이 시계방향으로 돌려 둔 버퍼 → 센서 원래 방향
-        }
-        return CGPoint(x: x, y: y)
+        ) else { return CGPoint(x: 0.5, y: 0.5) }
+        let sensor = point.applying(transform.inverted())
+        return CGPoint(x: min(max(sensor.x, 0), 1), y: min(max(sensor.y, 0), 1))
     }
 }
 

@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// 탭/길게 누른 위치
+/// 센서 기준 초점 위치. 미리보기 크기와 방향이 바뀌어도 유지한다.
 struct FocusMark: Equatable {
-    var point: CGPoint
+    var devicePoint: CGPoint
     var locked: Bool
     var id: Int
 }
@@ -10,7 +10,8 @@ struct FocusMark: Equatable {
 /// 초점 사각형 + 노출 슬라이더(해 아이콘).
 /// 초점 표시가 떠 있을 때 화면을 위아래로 끌면 노출(EV)이 바뀝니다.
 struct FocusOverlay: View {
-    let mark: FocusMark
+    let point: CGPoint
+    let locked: Bool
     let exposureBias: Float
     let dimmed: Bool
     let showSlider: Bool
@@ -23,7 +24,7 @@ struct FocusOverlay: View {
 
     var body: some View {
         // 화면 오른쪽 끝 근처면 슬라이더를 왼쪽에 표시
-        let sliderOnLeft = mark.point.x + boxSize / 2 + 30 > containerSize.width
+        let sliderOnLeft = point.x + boxSize / 2 + 30 > containerSize.width
         let sliderX: CGFloat = sliderOnLeft ? -(boxSize / 2 + 18) : (boxSize / 2 + 18)
         let sunY = CGFloat(-exposureBias / 2) * (sliderHeight / 2)
 
@@ -32,7 +33,7 @@ struct FocusOverlay: View {
                 .stroke(Theme.accent, lineWidth: 1.5)
                 .frame(width: boxSize, height: boxSize)
                 .overlay(alignment: .top) {
-                    if mark.locked {
+                    if locked {
                         Image(systemName: "lock.fill")
                             .font(.system(size: 9, weight: .bold))
                             .foregroundStyle(Theme.accent)
@@ -57,7 +58,7 @@ struct FocusOverlay: View {
             .offset(x: sliderX)
         }
         .opacity(dimmed ? 0.45 : 1)
-        .position(mark.point)
+        .position(point)
         .animation(.easeOut(duration: 0.2), value: dimmed)
         .animation(.easeOut(duration: 0.15), value: showSlider)
         .onAppear {

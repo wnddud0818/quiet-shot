@@ -88,7 +88,7 @@ final class CameraController: NSObject, ObservableObject {
         var id: ObjectIdentifier { ObjectIdentifier(connection) }
     }
     @Published private(set) var previewSource: PreviewSource?
-    /// 설정의 진단 표시용. 렌더링에는 각 화면의 코디네이터를 직접 사용한다.
+    /// 본 화면의 초점 표시와 진단 정보에 사용하는 미리보기 회전각.
     @Published private(set) var mainPreviewRotationAngle: CGFloat?
     /// 미리보기로 들어오는 프레임 크기
     @Published private(set) var previewFrameSize = CGSize.zero

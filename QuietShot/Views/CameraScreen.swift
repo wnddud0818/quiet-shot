@@ -5,7 +5,8 @@ import UIKit
 struct CameraScreen: View {
     var body: some View {
         GeometryReader { geometry in
-            CameraContent(size: geometry.size, regions: DuoRegions.read(geometry))
+            CameraContent(size: geometry.size, regions: DuoRegions.read(geometry),
+                          trailingSafeAreaInset: geometry.safeAreaInsets.trailing)
         }
     }
 }
@@ -13,6 +14,7 @@ struct CameraScreen: View {
 private struct CameraContent: View {
     let size: CGSize
     let regions: DuoRegions
+    let trailingSafeAreaInset: CGFloat
     @StateObject private var camera = CameraController()
     @StateObject private var orientation = DeviceOrientationMonitor()
     @Environment(\.scenePhase) private var scenePhase
@@ -50,9 +52,10 @@ private struct CameraContent: View {
     @State private var outerPreviewEnabled = true
     @State private var outerPreviewAvailable = false
 
-    init(size: CGSize, regions: DuoRegions) {
+    init(size: CGSize, regions: DuoRegions, trailingSafeAreaInset: CGFloat) {
         self.size = size
         self.regions = regions
+        self.trailingSafeAreaInset = trailingSafeAreaInset
     }
 
     /// 셀프 타이머 남은 초 (바깥 화면과 공유)
@@ -65,6 +68,10 @@ private struct CameraContent: View {
             || (horizontalSizeClass == .regular && verticalSizeClass == .regular)
     }
     private var landscape: Bool { size.width > size.height }
+    private var hardwareShutterEnabled: Bool {
+        scenePhase == .active && camera.status == .running && camera.previewSource != nil
+            && !showSettings && !showDuoSettings && !camera.isChangingMode && !camera.isSwitchingCamera
+    }
 
     var body: some View {
         ZStack {
@@ -83,13 +90,14 @@ private struct CameraContent: View {
         .overlay(alignment: .top) { toastView }
         .background {
             CameraWindowObserver(
+                shutterEnabled: hardwareShutterEnabled,
+                onHardwareShutter: handleHardwareShutter,
                 onForwardFacingCamerasChange: { ids, outer in
                     outerCameraFacesView = outer
                     camera.updateForwardFacingCameras(ids)
                 },
                 onInterfaceOrientationChange: { interfaceOrientation = $0 }
             )
-            .allowsHitTesting(false)
         }
         .modifier(DuoHingeObserver(isClosed: $hingeReading))
         .onChange(of: hingeClosed) {
@@ -116,6 +124,15 @@ private struct CameraContent: View {
             updateLocationUpdates()
         }
         .onChange(of: camera.status) { _, _ in updateLocationUpdates() }
+        .onChange(of: hardwareShutterEnabled) { _, enabled in
+            if !enabled { cancelHardwareHold() }
+        }
+        .onChange(of: camera.previewSource?.id) {
+            cancelHardwareHold()
+            focusTask?.cancel()
+            focus = nil
+        }
+        .onDisappear { cancelHardwareHold() }
         .onChange(of: saveLocation) { _, _ in updateLocationUpdates() }
         .onChange(of: orientation.iconRotation) { _, rotation in
             camera.deviceIsLandscape = abs(rotation) == 90
@@ -215,10 +232,13 @@ private struct CameraContent: View {
         let rail = CGRect(x: size.width - railWidth, y: 0, width: railWidth, height: size.height)
         return ZStack(alignment: .trailing) {
             GeometryReader { viewport in
-                let spareWidth = max(0, viewport.size.width - viewport.size.height * previewAspect(landscape: landscape))
+                let padding = FramePreviewMath.trailingPadding(
+                    viewport: viewport.size, aspect: previewAspect(landscape: landscape),
+                    railWidth: railWidth, safeAreaInset: trailingSafeAreaInset
+                )
                 previewArea(landscape: landscape, persistentControls: true)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(.trailing, min(railWidth, spareWidth))
+                    .padding(.trailing, padding)
             }
             .ignoresSafeArea(.container, edges: .horizontal)
 
@@ -512,21 +532,20 @@ private struct CameraContent: View {
                         onTap: handleTap,
                         onLongPress: handleLongPress,
                         onPinch: handlePinch,
-                        onPan: { handlePan($0, $1, persistentControls: persistentControls) },
-                        onHardwareShutter: handleHardwareShutter
+                        onPan: { handlePan($0, $1, persistentControls: persistentControls) }
                     )
                     .id(source.id)
                     .transition(.identity)
-                    .onDisappear { cancelHardwareHold() }
                 }
             }
             .overlay {
                 if showGrid { GridOverlay().allowsHitTesting(false) }
             }
             .overlay {
-                if let focus {
+                if let focus, let point = focusViewPoint(focus, in: proxy.size) {
                     FocusOverlay(
-                        mark: focus,
+                        point: point,
+                        locked: focus.locked,
                         exposureBias: camera.exposureBias,
                         dimmed: focusDimmed,
                         showSlider: exposureDragStart != nil,
@@ -786,19 +805,30 @@ private struct CameraContent: View {
 
     // MARK: - 제스처 처리
 
-    private func handleTap(_ layerPoint: CGPoint, _ devicePoint: CGPoint) {
+    private func focusViewPoint(_ mark: FocusMark, in size: CGSize) -> CGPoint? {
+        guard let source = camera.previewSource, let angle = camera.mainPreviewRotationAngle,
+              let transform = FramePreviewMath.deviceToViewTransform(
+                viewSize: size, bufferSize: camera.previewFrameSize,
+                rotationQuarters: FramePreviewMath.quarterTurns(angle - source.connectionAngle),
+                mirrored: source.device.position == .front,
+                connectionQuarters: FramePreviewMath.quarterTurns(source.connectionAngle)
+              ) else { return nil }
+        return mark.devicePoint.applying(transform)
+    }
+
+    private func handleTap(_ devicePoint: CGPoint) {
         if drawerOpen {
             withAnimation { drawerOpen = false }
             return
         }
         camera.focus(at: devicePoint, lock: false)
-        showFocus(at: layerPoint, locked: false)
+        showFocus(at: devicePoint, locked: false)
     }
 
-    private func handleLongPress(_ layerPoint: CGPoint, _ devicePoint: CGPoint) {
+    private func handleLongPress(_ devicePoint: CGPoint) {
         Haptics.impact(.medium)
         camera.focus(at: devicePoint, lock: true)
-        showFocus(at: layerPoint, locked: true)
+        showFocus(at: devicePoint, locked: true)
     }
 
     private func handlePinch(_ state: UIGestureRecognizer.State, _ scale: CGFloat) {
@@ -840,9 +870,9 @@ private struct CameraContent: View {
         }
     }
 
-    private func showFocus(at point: CGPoint, locked: Bool) {
+    private func showFocus(at devicePoint: CGPoint, locked: Bool) {
         focusDimmed = false
-        focus = FocusMark(point: point, locked: locked, id: (focus?.id ?? 0) + 1)
+        focus = FocusMark(devicePoint: devicePoint, locked: locked, id: (focus?.id ?? 0) + 1)
         scheduleFocusFade()
     }
 
@@ -904,7 +934,7 @@ private struct CameraContent: View {
 
     /// 볼륨 버튼 / 카메라 제어 버튼: 누르고 떼면 촬영, 길게 누르면 연속 촬영
     private func handleHardwareShutter(_ phase: HardwareShutterPhase) {
-        guard !showSettings, !showDuoSettings, !camera.isChangingMode, scenePhase == .active else {
+        guard hardwareShutterEnabled else {
             cancelHardwareHold()
             return
         }

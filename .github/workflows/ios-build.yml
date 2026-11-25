@@ -59,6 +59,11 @@ jobs:
           xcodebuild -version
           xcrun swift --version
 
+      - name: Check focus projection and shutter rail layout
+        run: |
+          xcrun swiftc QuietShot/Views/FramePreviewMath.swift tests/PreviewGeometryTests.swift -o "$RUNNER_TEMP/check-preview"
+          "$RUNNER_TEMP/check-preview"
+
       - name: Archive (unsigned)
         run: |
           set -o pipefail

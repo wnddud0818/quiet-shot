@@ -12,16 +12,14 @@ enum HardwareShutterPhase {
 
 /// 본 화면 카메라 미리보기 (프레임을 직접 그리는 FramePreviewView) + 카메라 제스처.
 /// - 탭: 초점/노출, 길게 누르기: AE/AF 잠금, 두 손가락 핀치: 줌, 한 손가락 위아래 드래그: 노출 또는 빠른 설정
-/// - 볼륨 버튼·카메라 제어 버튼: 셔터 (iOS 17.2+)
 struct CameraPreview: UIViewRepresentable {
     let camera: CameraController
     let source: CameraController.PreviewSource
     let bufferSize: CGSize
-    let onTap: (_ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void
-    let onLongPress: (_ viewPoint: CGPoint, _ devicePoint: CGPoint) -> Void
+    let onTap: (_ devicePoint: CGPoint) -> Void
+    let onLongPress: (_ devicePoint: CGPoint) -> Void
     let onPinch: (_ state: UIGestureRecognizer.State, _ scale: CGFloat) -> Void
     let onPan: (_ state: UIGestureRecognizer.State, _ translation: CGSize) -> Void
-    let onHardwareShutter: (HardwareShutterPhase) -> Void
 
     func makeUIView(context: Context) -> FramePreviewView {
         let view = FramePreviewView(camera: camera, source: source, mirrored: source.device.position == .front)
@@ -37,7 +35,6 @@ struct CameraPreview: UIViewRepresentable {
         pan.maximumNumberOfTouches = 1
         [tap, longPress, pinch, pan].forEach(view.addGestureRecognizer)
 
-        coordinator.installHardwareShutter(on: view)
         view.bufferSize = bufferSize
         return view
     }
@@ -54,7 +51,6 @@ struct CameraPreview: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject {
         var parent: CameraPreview
-        private var eventInteraction: UIInteraction?
 
         init(parent: CameraPreview) {
             self.parent = parent
@@ -65,13 +61,13 @@ struct CameraPreview: UIViewRepresentable {
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
             guard let view = recognizer.view as? FramePreviewView else { return }
             let point = recognizer.location(in: view)
-            parent.onTap(point, view.devicePoint(for: point))
+            parent.onTap(view.devicePoint(for: point))
         }
 
         @objc func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
             guard recognizer.state == .began, let view = recognizer.view as? FramePreviewView else { return }
             let point = recognizer.location(in: view)
-            parent.onLongPress(point, view.devicePoint(for: point))
+            parent.onLongPress(view.devicePoint(for: point))
         }
 
         @objc func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
@@ -82,43 +78,46 @@ struct CameraPreview: UIViewRepresentable {
             let translation = recognizer.translation(in: recognizer.view)
             parent.onPan(recognizer.state, CGSize(width: translation.x, height: translation.y))
         }
-
-        // MARK: 하드웨어 셔터 (볼륨 버튼, 카메라 제어 버튼, AirPods)
-
-        func installHardwareShutter(on view: UIView) {
-            guard #available(iOS 17.2, *) else { return }
-            let interaction = AVCaptureEventInteraction { [weak self] event in
-                let phase: HardwareShutterPhase
-                switch event.phase {
-                case .began: phase = .began
-                case .ended: phase = .ended
-                default: phase = .cancelled
-                }
-                self?.parent.onHardwareShutter(phase)
-            }
-            view.addInteraction(interaction)
-            eventInteraction = interaction
-        }
     }
 }
 
-/// 접힘이나 카메라 전환으로 미리보기가 교체되어도 본 화면을 기준으로 방향을 추적한다.
+/// 미리보기가 교체되어도 같은 뷰에서 창 방향과 하드웨어 셔터 입력을 추적한다.
 struct CameraWindowObserver: UIViewRepresentable {
+    let shutterEnabled: Bool
+    let onHardwareShutter: (HardwareShutterPhase) -> Void
     let onForwardFacingCamerasChange: ([String], Bool?) -> Void
     let onInterfaceOrientationChange: (UIInterfaceOrientation) -> Void
 
     func makeUIView(context: Context) -> ObserverView {
         let view = ObserverView()
+        if #available(iOS 17.2, *) {
+            let interaction = AVCaptureEventInteraction { [weak view] event in
+                switch event.phase {
+                case .began: view?.onHardwareShutter?(.began)
+                case .ended: view?.onHardwareShutter?(.ended)
+                default: view?.onHardwareShutter?(.cancelled)
+                }
+            }
+            view.addInteraction(interaction)
+            view.shutterInteraction = interaction
+        }
         updateUIView(view, context: context)
         return view
     }
 
     func updateUIView(_ view: ObserverView, context: Context) {
+        view.onHardwareShutter = onHardwareShutter
+        if #available(iOS 17.2, *), let interaction = view.shutterInteraction as? AVCaptureEventInteraction,
+           interaction.isEnabled != shutterEnabled {
+            interaction.isEnabled = shutterEnabled
+        }
         view.onForwardFacingCamerasChange = onForwardFacingCamerasChange
         view.onInterfaceOrientationChange = onInterfaceOrientationChange
     }
 
     final class ObserverView: UIView {
+        weak var shutterInteraction: UIInteraction?
+        var onHardwareShutter: ((HardwareShutterPhase) -> Void)?
         var onForwardFacingCamerasChange: (([String], Bool?) -> Void)?
         var onInterfaceOrientationChange: ((UIInterfaceOrientation) -> Void)?
         private var directionCoordinator: AnyObject?
