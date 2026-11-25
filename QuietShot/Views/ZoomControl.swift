@@ -32,6 +32,7 @@ struct ZoomControl: View {
                     minValue: minDisplay,
                     maxValue: maxDisplay,
                     presets: configuration.presets.map(\.display),
+                    iconAngle: iconAngle,
                     pointsPerDoubling: pointsPerDoubling
                 )
                 .frame(height: 78)
@@ -145,6 +146,7 @@ struct ZoomDial: View {
     let minValue: CGFloat
     let maxValue: CGFloat
     let presets: [CGFloat]
+    let iconAngle: Angle
     let pointsPerDoubling: CGFloat
 
     var body: some View {
@@ -153,6 +155,7 @@ struct ZoomDial: View {
             Text(ZoomPreset.format(value) + "×")
                 .font(.system(size: 14, weight: .bold, design: .rounded).monospacedDigit())
                 .foregroundStyle(Theme.accent)
+                .rotationEffect(iconAngle)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 3)
                 .background(Capsule().fill(Color.black.opacity(0.65)))
@@ -204,11 +207,14 @@ struct ZoomDial: View {
                 tick.move(to: CGPoint(x: px, y: baseline))
                 tick.addLine(to: CGPoint(x: px, y: baseline - 16))
                 context.stroke(tick, with: .color(.white), lineWidth: 1.5)
-                context.draw(
+                var labelContext = context
+                labelContext.translateBy(x: px, y: baseline - 26)
+                labelContext.rotate(by: iconAngle)
+                labelContext.draw(
                     Text(ZoomPreset.format(preset))
                         .font(.system(size: 11, weight: .semibold, design: .rounded))
                         .foregroundColor(.white),
-                    at: CGPoint(x: px, y: baseline - 26)
+                    at: .zero
                 )
             }
 

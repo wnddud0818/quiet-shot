@@ -6,7 +6,7 @@ struct CameraScreen: View {
     var body: some View {
         GeometryReader { geometry in
             CameraContent(size: geometry.size, regions: DuoRegions.read(geometry),
-                          trailingSafeAreaInset: geometry.safeAreaInsets.trailing)
+                          safeInsets: geometry.safeAreaInsets)
         }
     }
 }
@@ -14,7 +14,7 @@ struct CameraScreen: View {
 private struct CameraContent: View {
     let size: CGSize
     let regions: DuoRegions
-    let trailingSafeAreaInset: CGFloat
+    let safeInsets: EdgeInsets
     @StateObject private var camera = CameraController()
     @StateObject private var orientation = DeviceOrientationMonitor()
     @Environment(\.scenePhase) private var scenePhase
@@ -47,15 +47,16 @@ private struct CameraContent: View {
 
     // iPhone Duo
     @State private var hingeReading: Bool?
+    @State private var controlAnchor: DuoControlSpace.Anchor?
     @State private var outerCameraFacesView: Bool?
     @State private var showDuoSettings = false
     @State private var outerPreviewEnabled = true
     @State private var outerPreviewAvailable = false
 
-    init(size: CGSize, regions: DuoRegions, trailingSafeAreaInset: CGFloat) {
+    init(size: CGSize, regions: DuoRegions, safeInsets: EdgeInsets) {
         self.size = size
         self.regions = regions
-        self.trailingSafeAreaInset = trailingSafeAreaInset
+        self.safeInsets = safeInsets
     }
 
     /// 셀프 타이머 남은 초 (바깥 화면과 공유)
@@ -190,19 +191,44 @@ private struct CameraContent: View {
 
     // MARK: - iPhone Duo 레이아웃
 
-    @ViewBuilder
-    private var runningContent: some View {
-        let fold = regions.fold
-        let previewLandscape: Bool = {
-            guard !duoClosed, let fold else { return landscape }
-            return fold.width >= fold.height ? size.width > fold.minY : fold.minX > size.height
-        }()
+    private var usesFixedControls: Bool {
+        hingeClosed != nil || regions.hasDivision || outerPreviewAvailable
+    }
 
-        ZStack {
-            if !duoClosed, let fold {
-                foldedLayout(fold: fold, size: size)
-            } else if duoClosed || innerDisplay {
-                duoLayout
+    private var sceneAngle: Double { Self.angle(for: interfaceOrientation) }
+
+    private var safeBounds: CGRect {
+        CGRect(origin: CGPoint(x: safeInsets.leading, y: safeInsets.top), size: size)
+    }
+
+    private var sceneSize: CGSize {
+        CGSize(width: size.width + safeInsets.leading + safeInsets.trailing,
+               height: size.height + safeInsets.top + safeInsets.bottom)
+    }
+
+    private var controlSpace: DuoControlSpace {
+        let fixed = usesFixedControls
+        let posture: DuoControlSpace.Posture
+        if fixed {
+            posture = duoClosed ? .closed : (regions.divisionActive ? .folded : .open)
+        } else {
+            posture = landscape ? .open : .closed
+        }
+        return DuoControlSpace(sceneSize: sceneSize, safeBounds: safeBounds, sceneDegrees: fixed ? sceneAngle : 0,
+                               posture: posture,
+                               sceneFold: regions.fold?.offsetBy(dx: safeBounds.minX, dy: safeBounds.minY),
+                               previous: fixed ? controlAnchor : nil)
+    }
+
+    private var runningContent: some View {
+        let space = controlSpace
+        let previewPane = space.viewfinder.applying(space.fixedToScene)
+        let previewLandscape = previewPane.width > previewPane.height
+        return ZStack {
+            if usesFixedControls || innerDisplay {
+                duoLayout(space: space, previewLandscape: previewLandscape)
+                    .position(x: sceneSize.width / 2 - safeBounds.minX, y: sceneSize.height / 2 - safeBounds.minY)
+                    .frame(width: size.width, height: size.height)
             } else if landscape {
                 landscapeLayout
                     .padding(regions.occlusionInsets(in: size))
@@ -212,48 +238,82 @@ private struct CameraContent: View {
             }
         }
         .accessibilityHidden(showDuoSettings)
-        .overlay(alignment: .trailing) {
-            duoSettingsPanel(regions: regions, size: size)
-        }
+        .overlay(alignment: .trailing) { duoSettingsPanel(space: space) }
         .modifier(OuterDisplayAccessory(camera: camera, isEnabled: $outerPreviewEnabled, isAvailable: $outerPreviewAvailable))
         .onAppear { camera.setInterfaceLandscape(previewLandscape) }
         .onChange(of: previewLandscape) { _, value in camera.setInterfaceLandscape(value) }
+        .onChange(of: usesFixedControls && interfaceOrientation != .unknown ? space.anchor : nil, initial: true) {
+            _, anchor in controlAnchor = anchor
+        }
     }
 
-    private var duoLayout: some View {
+    private func duoLayout(space: DuoControlSpace, previewLandscape: Bool) -> some View {
         let railWidth: CGFloat = 96
-        let insets = regions.occlusionInsets(in: size)
-        return ZStack {
-            GeometryReader { viewport in
-                let padding = landscape ? FramePreviewMath.trailingPadding(
-                    viewport: viewport.size, aspect: previewAspect(landscape: true),
-                    railWidth: railWidth, safeAreaInset: trailingSafeAreaInset + insets.trailing
-                ) : 0
-                previewArea(landscape: landscape, separateControls: true)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(.trailing, padding)
+        let inverse = space.fixedToScene.inverted()
+        var fixedRegions = regions
+        fixedRegions.occlusions = regions.occlusions.map {
+            $0.offsetBy(dx: safeBounds.minX, dy: safeBounds.minY).applying(inverse)
+        }
+        let controls = space.controls
+        let viewfinder = space.viewfinder
+        let insets = fixedRegions.occlusionInsets(in: controls)
+        var image = viewfinder
+        if !space.split {
+            image = CGRect(origin: .zero, size: space.size)
+            if space.sideRail {
+                let aspect = previewAspect(landscape: previewLandscape)
+                let fixedAspect = abs(space.sceneDegrees) == 90 ? 1 / aspect : aspect
+                image.size.width -= FramePreviewMath.trailingPadding(
+                    viewport: image.size, aspect: fixedAspect, railWidth: railWidth,
+                    safeAreaInset: image.maxX - controls.maxX + insets.trailing
+                )
             }
-            .ignoresSafeArea(.container, edges: .horizontal)
+        }
+        let sceneImage = image.applying(space.fixedToScene)
+        return ZStack(alignment: .topLeading) {
+            // UIView의 레이어와 탭 좌표는 시스템 창과 같은 방향으로 둔다.
+            previewArea(landscape: previewLandscape, separateControls: true)
+                .frame(width: sceneImage.width, height: sceneImage.height)
+                .position(x: sceneImage.midX, y: sceneImage.midY)
 
-            DuoCaptureControls(
-                landscape: landscape, railWidth: railWidth,
-                tools: duoTools, lenses: zoomControl, modes: modeSelector,
-                shutter: shutter, gallery: galleryControl, flip: flipControl
-            )
-            .padding(insets)
-            .background(alignment: .bottom) {
-                LinearGradient(colors: [.clear, .black.opacity(0.72)], startPoint: .top, endPoint: .bottom)
-                    .frame(height: landscape ? 96 : 184)
-                    .allowsHitTesting(false)
+            ZStack(alignment: .topLeading) {
+                if space.split {
+                    Color.clear
+                        .frame(width: viewfinder.width, height: viewfinder.height)
+                        .allowsHitTesting(false)
+                        .overlay(alignment: .top) {
+                            duoTools.padding(.horizontal, 12).padding(.top, 8)
+                                .padding(fixedRegions.occlusionInsets(in: viewfinder))
+                        }
+                        .overlay(alignment: .bottom) {
+                            zoomControl.padding(8).padding(fixedRegions.occlusionInsets(in: viewfinder))
+                        }
+                        .clipped()
+                        .position(x: viewfinder.midX, y: viewfinder.midY)
+                }
+                DuoCaptureControls(
+                    landscape: space.sideRail, railWidth: railWidth,
+                    tools: Group { if !space.split { duoTools } },
+                    lenses: Group { if !space.split { zoomControl } }, modes: modeSelector,
+                    shutter: shutter, gallery: galleryControl, flip: flipControl
+                )
+                .padding(insets)
+                .background(alignment: .bottom) {
+                    LinearGradient(colors: [.clear, .black.opacity(0.72)], startPoint: .top, endPoint: .bottom)
+                        .frame(height: space.sideRail ? 96 : 184).allowsHitTesting(false)
+                }
+                .background(alignment: .top) {
+                    LinearGradient(colors: [.black.opacity(0.5), .clear], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 68).allowsHitTesting(false)
+                }
+                .frame(width: controls.width, height: controls.height)
+                .clipped()
+                .position(x: controls.midX, y: controls.midY)
             }
-            .background(alignment: .top) {
-                LinearGradient(colors: [.black.opacity(0.5), .clear], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 68)
-                    .allowsHitTesting(false)
-            }
+            .modifier(DuoControlPlacement(space: space))
             .opacity(camera.isSystemControlFullscreen ? 0 : 1)
         }
-        .frame(width: size.width, height: size.height)
+        .frame(width: sceneSize.width, height: sceneSize.height)
     }
 
     private var duoTools: some View {
@@ -270,19 +330,17 @@ private struct CameraContent: View {
     }
 
     @ViewBuilder
-    private func duoSettingsPanel(regions: DuoRegions, size: CGSize) -> some View {
+    private func duoSettingsPanel(space: DuoControlSpace) -> some View {
         if showDuoSettings {
-            let fold = regions.fold
-            let verticalFold = fold.map { $0.width < $0.height } ?? false
-            let width = verticalFold ? size.width - (fold?.maxX ?? 0) : size.width * 0.9
-            let top = verticalFold ? 0 : fold?.maxY ?? 0
-            ZStack(alignment: .bottomTrailing) {
+            let pane = space.controls.applying(space.fixedToScene)
+                .offsetBy(dx: -safeBounds.minX, dy: -safeBounds.minY)
+            ZStack(alignment: .topLeading) {
                 Color.black.opacity(0.45)
                     .onTapGesture { showDuoSettings = false }
                 SettingsView(camera: camera, onDone: { showDuoSettings = false })
-                    .padding(regions.occlusionInsets(in: size))
-                    .frame(width: min(360, width))
-                    .padding(.top, top)
+                    .padding(regions.occlusionInsets(in: pane))
+                    .frame(width: min(360, pane.width), height: pane.height)
+                    .position(x: pane.maxX - min(360, pane.width) / 2, y: pane.midY)
             }
             .accessibilityAddTraits(.isModal)
         }
@@ -291,64 +349,7 @@ private struct CameraContent: View {
     private func openSettings() {
         cancelHardwareHold()
         drawerOpen = false
-        if hingeClosed != nil { showDuoSettings = true } else { showSettings = true }
-    }
-
-    /// 접는 선을 넘지 않도록 미리보기와 셔터에 각각 독립된 영역을 준다.
-    @ViewBuilder
-    private func foldedLayout(fold: CGRect, size: CGSize) -> some View {
-        if fold.width >= fold.height {
-            let preview = CGRect(x: 0, y: 0, width: size.width, height: fold.minY)
-            let controls = CGRect(x: 0, y: fold.maxY, width: size.width, height: size.height - fold.maxY)
-            VStack(spacing: 0) {
-                foldedPreview(in: preview)
-                Color.clear.frame(height: fold.height)
-                foldedControls(in: controls, landscape: false)
-            }
-        } else {
-            let preview = CGRect(x: 0, y: 0, width: fold.minX, height: size.height)
-            let controls = CGRect(x: fold.maxX, y: 0, width: size.width - fold.maxX, height: size.height)
-            HStack(spacing: 0) {
-                foldedPreview(in: preview)
-                Color.clear.frame(width: fold.width)
-                foldedControls(in: controls, landscape: true)
-            }
-        }
-    }
-
-    private func foldedPreview(in pane: CGRect) -> some View {
-        let insets = regions.occlusionInsets(in: pane)
-        return previewArea(landscape: pane.width > pane.height, separateControls: true)
-            .frame(width: pane.width, height: pane.height)
-            .overlay(alignment: .top) {
-                duoTools
-                    .padding(.horizontal, 12)
-                    .padding(.top, 8)
-                    .padding(insets)
-                    .opacity(camera.isSystemControlFullscreen ? 0 : 1)
-            }
-            .overlay(alignment: .bottom) {
-                zoomControl
-                    .padding(.horizontal, 8)
-                    .padding(.bottom, 8)
-                    .padding(insets)
-            }
-            .clipped()
-    }
-
-    private func foldedControls(in pane: CGRect, landscape: Bool) -> some View {
-        let insets = regions.occlusionInsets(in: pane)
-        // 좁은 책 모드에서는 모드 선택과 셔터가 겹치지 않게 하단 바를 쓴다.
-        let sideRail = landscape && pane.width - insets.leading - insets.trailing >= 250
-        return DuoCaptureControls(
-            landscape: sideRail, railWidth: 96,
-            tools: EmptyView(), lenses: EmptyView(), modes: modeSelector,
-            shutter: shutter, gallery: galleryControl, flip: flipControl
-        )
-        .padding(insets)
-        .frame(width: pane.width, height: pane.height)
-        .clipped()
-        .opacity(camera.isSystemControlFullscreen ? 0 : 1)
+        if usesFixedControls { showDuoSettings = true } else { showSettings = true }
     }
 
     private var quickControls: some View {
@@ -365,13 +366,13 @@ private struct CameraContent: View {
         .id(camera.captureMode)
     }
 
+    /// 미리보기 안의 표시와 고정된 버튼은 서로 다른 좌표계에서 그린다.
+    private var previewIconAngle: Angle { .degrees(orientation.iconRotation - sceneAngle) }
     private var iconAngle: Angle {
-        // Duo의 조작부는 현재 창과 함께 회전한다. 기울기 센서는 촬영 방향에 계속 사용한다.
-        if duoClosed || innerDisplay { return .zero }
-        var angle = orientation.iconRotation - Self.angle(for: interfaceOrientation)
-        if angle > 180 { angle -= 360 }
-        if angle <= -180 { angle += 360 }
-        return .degrees(angle)
+        if usesFixedControls {
+            return .degrees(controlSpace.labelDegrees(for: orientation.iconRotation))
+        }
+        return innerDisplay ? .zero : previewIconAngle
     }
 
     // MARK: - 상단
@@ -410,28 +411,35 @@ private struct CameraContent: View {
 
     /// 무음 표시 + 해상도 + 빠른 설정 열기
     private func statusPill(vertical: Bool) -> some View {
-        Button {
+        let glyphAngle = usesFixedControls ? iconAngle : .zero
+        return Button {
             Haptics.selection()
             withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) { drawerOpen.toggle() }
         } label: {
             HStack(spacing: 6) {
                 if camera.captureMode == .video {
                     Image(systemName: "video.fill")
+                        .rotationEffect(glyphAngle)
                     Text("동영상")
+                        .rotationEffect(glyphAngle)
                 } else {
                     Image(systemName: "speaker.slash.fill")
-                    Text(camera.megapixelText(for: aspectRatio)).monospacedDigit()
+                        .rotationEffect(glyphAngle)
+                    Text(camera.megapixelText(for: aspectRatio)).monospacedDigit().rotationEffect(glyphAngle)
                 }
                 if camera.captureMode == .photo, captureTimer != .off {
                     Image(systemName: "timer")
+                        .rotationEffect(glyphAngle)
                     Text("\(captureTimer.rawValue)")
                         .monospacedDigit()
+                        .rotationEffect(glyphAngle)
                 }
                 Image(systemName: "chevron.down")
                     .font(.system(size: 10, weight: .bold))
-                    .rotationEffect(.degrees(drawerOpen ? 180 : 0))
+                    .rotationEffect(.degrees(glyphAngle.degrees + (drawerOpen ? 180 : 0)))
             }
             .font(.system(size: 13, weight: .semibold, design: .rounded))
+            .frame(minHeight: usesFixedControls ? 32 : nil)
             .foregroundStyle(drawerOpen ? Color.black : Color.white)
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
@@ -479,6 +487,7 @@ private struct CameraContent: View {
                     FocusOverlay(
                         point: point,
                         locked: focus.locked,
+                        iconAngle: usesFixedControls ? previewIconAngle : .zero,
                         exposureBias: camera.exposureBias,
                         dimmed: focusDimmed,
                         showSlider: exposureDragStart != nil,
@@ -538,6 +547,8 @@ private struct CameraContent: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
                     .background(Capsule().fill(Theme.accent))
+                    .rotationEffect(usesFixedControls ? iconAngle : .zero)
+                    .frame(minHeight: usesFixedControls ? 54 : nil)
                     .transition(.opacity)
             }
         }
@@ -566,7 +577,7 @@ private struct CameraContent: View {
                 .font(.system(size: 120, weight: .thin, design: .rounded).monospacedDigit())
                 .foregroundStyle(.white)
                 .shadow(color: .black.opacity(0.5), radius: 12)
-                .rotationEffect(iconAngle)
+                .rotationEffect(usesFixedControls ? previewIconAngle : iconAngle)
                 .contentTransition(.numericText(countsDown: true))
                 .animation(.easeOut(duration: 0.25), value: countdown)
                 .allowsHitTesting(false)
@@ -579,19 +590,22 @@ private struct CameraContent: View {
     private var recordingBadge: some View {
         HStack(spacing: 6) {
             switch camera.recordingState {
-            case .starting: Text("녹화 준비 중")
+            case .starting: Text("녹화 준비 중").rotationEffect(usesFixedControls ? iconAngle : .zero)
             case .recording(let start):
                 Circle().fill(.red).frame(width: 9, height: 9)
                 Text(start, style: .timer).fixedSize()
+                    .rotationEffect(usesFixedControls ? iconAngle : .zero)
                     .accessibilityLabel("녹화 시간")
-            case .finishing: Text("저장 중")
+            case .finishing: Text("저장 중").rotationEffect(usesFixedControls ? iconAngle : .zero)
             case .idle: EmptyView()
             }
             if !camera.recordsAudio {
                 Label("소리 없음", systemImage: "mic.slash.fill")
+                    .rotationEffect(usesFixedControls ? iconAngle : .zero)
             }
         }
         .font(.caption.bold().monospacedDigit())
+        .frame(minHeight: usesFixedControls ? 60 : nil)
         .foregroundStyle(.white)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
@@ -646,6 +660,7 @@ private struct CameraContent: View {
             ShutterButton(
                 isBursting: camera.isBursting,
                 burstCount: camera.burstCount,
+                iconAngle: usesFixedControls ? iconAngle : .zero,
                 isCountingDown: countdown != nil,
                 onTap: shutterTapped,
                 onBurstStart: {

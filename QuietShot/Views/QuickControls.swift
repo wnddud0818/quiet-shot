@@ -98,9 +98,9 @@ struct QuickControls: View {
                     .lineLimit(1)
             }
             .foregroundStyle(active ? Theme.accent : Color.white)
+            .rotationEffect(iconAngle)
             .frame(width: 52, height: 44)
             .contentShape(Rectangle())
-            .rotationEffect(iconAngle)
         }
         .buttonStyle(PressableStyle())
     }
@@ -122,6 +122,7 @@ struct QuickControls: View {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(.white)
+                    .rotationEffect(iconAngle)
                     .frame(width: 30, height: 44)
             }
             .accessibilityLabel("뒤로")
@@ -141,10 +142,10 @@ struct QuickControls: View {
                         }
                     }
                     .foregroundStyle(option.selected ? Color.black : Color.white)
+                    .rotationEffect(iconAngle)
                     .frame(minWidth: 50, minHeight: 40)
                     .padding(.horizontal, 4)
                     .background(Capsule().fill(option.selected ? Theme.accent : Theme.chip))
-                    .rotationEffect(iconAngle)
                 }
                 .buttonStyle(PressableStyle())
             }

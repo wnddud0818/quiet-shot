@@ -33,6 +33,7 @@ struct DuoRegions: Equatable {
     var fold: CGRect?
     /// 평평하게 펼쳐서 비활성인 접는 선도 안쪽 화면을 식별하는 데 사용한다.
     var hasDivision = false
+    var divisionActive = false
     /// 켜져 있는 화면 아래 카메라 영역 (UI를 피해서 배치)
     var occlusions: [CGRect] = []
 
@@ -42,13 +43,15 @@ struct DuoRegions: Equatable {
         #if canImport(AVKit.AVCaptureDeviceDirectionCoordinator)
         if #available(iOS 27.1, *) {
             let divisions = proxy.reservedRegions(kind: .division, options: .includeInactive)
-            let fold = divisions.first(where: { $0.isActive }).flatMap { division in
+            let active = divisions.first(where: { $0.isActive })
+            let fold = active.flatMap { division in
                 foldFrame(division.frame, in: proxy.size)
             }
             let occlusions = proxy.reservedRegions(kind: .occlusion)
                 .filter { $0.isActive }
                 .map { $0.frame }
-            return DuoRegions(fold: fold, hasDivision: !divisions.isEmpty, occlusions: occlusions)
+            return DuoRegions(fold: fold, hasDivision: !divisions.isEmpty,
+                              divisionActive: active != nil, occlusions: occlusions)
         }
         #endif
         return .none

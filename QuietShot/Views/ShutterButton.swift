@@ -4,6 +4,7 @@ import SwiftUI
 struct ShutterButton: View {
     let isBursting: Bool
     let burstCount: Int
+    let iconAngle: Angle
     let isCountingDown: Bool
     let onTap: () -> Void
     let onBurstStart: () -> Void
@@ -34,6 +35,7 @@ struct ShutterButton: View {
                 Text("\(burstCount)")
                     .font(.system(size: 20, weight: .bold, design: .rounded).monospacedDigit())
                     .foregroundStyle(Color.black)
+                    .rotationEffect(iconAngle)
                     .contentTransition(.numericText())
             }
         }

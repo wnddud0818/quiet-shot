@@ -12,6 +12,7 @@ struct FocusMark: Equatable {
 struct FocusOverlay: View {
     let point: CGPoint
     let locked: Bool
+    let iconAngle: Angle
     let exposureBias: Float
     let dimmed: Bool
     let showSlider: Bool
@@ -37,6 +38,7 @@ struct FocusOverlay: View {
                         Image(systemName: "lock.fill")
                             .font(.system(size: 9, weight: .bold))
                             .foregroundStyle(Theme.accent)
+                            .rotationEffect(iconAngle)
                             .offset(y: -12)
                     }
                 }
