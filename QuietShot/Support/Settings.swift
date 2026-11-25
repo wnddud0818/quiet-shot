@@ -8,6 +8,8 @@ enum SettingsKey {
     static let mirrorFrontCamera = "mirrorFrontCamera"
     static let showGrid = "showGrid"
     static let hapticOnCapture = "hapticOnCapture"
+    /// 줌 다이얼 눈금 햅틱 (기본 켜짐, 촬영 햅틱과 별도)
+    static let zoomDialHaptics = "zoomDialHaptics"
     static let forceFrameEngine = "forceFrameEngine"
     static let saveLocation = "saveLocation"
     static let aspectRatio = "aspectRatio"

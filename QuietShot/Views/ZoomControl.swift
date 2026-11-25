@@ -3,17 +3,21 @@ import SwiftUI
 /// 줌 버튼 줄 + 좌우로 끌면 나타나는 줌 다이얼.
 /// - 버튼 탭: 해당 배율로 부드럽게 이동 (선택된 버튼에는 현재 배율 표시)
 /// - 버튼 줄을 좌우로 드래그: 다이얼이 펼쳐지며 연속 줌 (왼쪽으로 끌면 확대)
+/// - 다이얼 햅틱: 눈금마다 틱, 렌즈 배율에서 탭, 끝에 닿으면 단단한 탭
 struct ZoomControl: View {
     let configuration: ZoomConfiguration
     let displayZoom: CGFloat
     let iconAngle: Angle
     var showsFixedZoom = false
+    /// 녹화 중에는 진동 소리가 마이크에 담기지 않도록 끈다.
+    var hapticsEnabled = true
     let onSelect: (ZoomPreset) -> Void
     let onContinuousZoom: (CGFloat) -> Void
 
     @State private var dialVisible = false
     @State private var dragStartDisplay: CGFloat?
-    @State private var lastDetent: CGFloat?
+    /// 다이얼을 끄는 동안 직전 배율 (햅틱 눈금 비교용)
+    @State private var lastValue: CGFloat?
     @State private var hideTask: Task<Void, Never>?
     /// 다이얼을 끌고 손을 뗄 때 그 아래 버튼이 눌린 것으로 처리되어 배율이 튀는 것을 막기 위함
     @State private var lastDragEnd = Date.distantPast
@@ -56,7 +60,7 @@ struct ZoomControl: View {
                         Button {
                             // 다이얼을 끄는 중이거나 방금 놓았으면 무시 (사이 배율 유지)
                             guard dragStartDisplay == nil, Date().timeIntervalSince(lastDragEnd) > 0.35 else { return }
-                            Haptics.selection()
+                            if hapticsEnabled { ZoomDialHaptics.shared.tick() }
                             onSelect(preset)
                         } label: {
                             chip(title: selected ? ZoomPreset.format(displayZoom) + "×" : preset.label, selected: selected)
@@ -102,19 +106,14 @@ struct ZoomControl: View {
                 hideTask?.cancel()
                 if dragStartDisplay == nil {
                     dragStartDisplay = displayZoom
-                    lastDetent = nil
                     lastValue = displayZoom
                     dialVisible = true
+                    if hapticsEnabled { ZoomDialHaptics.shared.prepare() }
                 }
                 let start = dragStartDisplay ?? displayZoom
                 let target = start * pow(2, -value.translation.width / pointsPerDoubling)
                 let clamped = min(max(target, minDisplay), maxDisplay)
-                // 렌즈 배율(0.5, 1, 2, 5…)을 지날 때 가벼운 햅틱
-                if let detent = configuration.presets.map(\.display).first(where: { crosses($0, from: lastDetentValue(start), to: clamped) }),
-                   detent != lastDetent {
-                    lastDetent = detent
-                    Haptics.selection()
-                }
+                if hapticsEnabled { dialFeedback(from: lastValue ?? start, to: clamped) }
                 lastValue = clamped
                 onContinuousZoom(clamped)
             }
@@ -129,10 +128,23 @@ struct ZoomControl: View {
             }
     }
 
-    @State private var lastValue: CGFloat?
+    /// 렌즈 배율(0.5, 1, 2, 5…)을 지나면 탭, 최소·최대 배율에 닿으면 단단한 탭,
+    /// 그 밖에는 다이얼에 그려진 작은 눈금(1/8 스톱)을 지날 때마다 가벼운 틱.
+    private func dialFeedback(from previous: CGFloat, to value: CGFloat) {
+        guard previous != value else { return }
+        let haptics = ZoomDialHaptics.shared
+        if configuration.presets.contains(where: { crosses($0.display, from: previous, to: value) }) {
+            haptics.detent()
+        } else if (value <= minDisplay || value >= maxDisplay) && previous > minDisplay && previous < maxDisplay {
+            haptics.limit()
+        } else if tickIndex(previous) != tickIndex(value) {
+            haptics.tick()
+        }
+    }
 
-    private func lastDetentValue(_ fallback: CGFloat) -> CGFloat {
-        lastValue ?? fallback
+    /// ZoomDial이 최소 배율부터 1/8 스톱 간격으로 그리는 눈금 번호
+    private func tickIndex(_ value: CGFloat) -> Int {
+        Int(((log2(max(value, 0.01)) - log2(minDisplay)) * 8 + 0.0001).rounded(.down))
     }
 
     private func crosses(_ detent: CGFloat, from: CGFloat, to: CGFloat) -> Bool {

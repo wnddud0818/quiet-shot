@@ -10,6 +10,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.mirrorFrontCamera) private var mirrorFrontCamera = false
     @AppStorage(SettingsKey.showGrid) private var showGrid = false
     @AppStorage(SettingsKey.hapticOnCapture) private var hapticOnCapture = false
+    @AppStorage(SettingsKey.zoomDialHaptics) private var zoomDialHaptics = true
     @AppStorage(SettingsKey.forceFrameEngine) private var forceFrameEngine = false
     @AppStorage(SettingsKey.saveLocation) private var saveLocation = true
     @AppStorage(SettingsKey.aspectRatio) private var aspectRatio: AspectRatioOption = .fourThree
@@ -94,7 +95,8 @@ struct SettingsView: View {
                         }
                     }
                     Toggle("격자 표시", isOn: $showGrid)
-                    Toggle("햅틱 피드백", isOn: $hapticOnCapture)
+                    Toggle("촬영 햅틱 피드백", isOn: $hapticOnCapture)
+                    Toggle("줌 다이얼 햅틱", isOn: $zoomDialHaptics)
                     if camera.shutterSuppressionSupported {
                         Toggle("항상 프레임 캡처 사용", isOn: $forceFrameEngine)
                             .onChange(of: forceFrameEngine) { _, _ in
@@ -105,9 +107,9 @@ struct SettingsView: View {
                     Text("촬영")
                 } footer: {
                     if camera.captureMode == .video {
-                        Text("빨간 셔터나 볼륨 버튼을 한 번 누르면 녹화를 시작하고 다시 누르면 끝냅니다. 녹화한 동영상은 사진 앱에 저장됩니다.")
+                        Text("빨간 셔터나 볼륨 버튼을 한 번 누르면 녹화를 시작하고 다시 누르면 끝냅니다. 녹화한 동영상은 사진 앱에 저장됩니다.\n줌 다이얼 햅틱은 녹화 중에는 울리지 않습니다.")
                     } else {
-                        Text("셔터: 탭하면 촬영, 길게 누르면 연속 촬영. 볼륨 버튼·카메라 제어 버튼으로도 촬영할 수 있습니다.\n미리보기: 탭하면 초점, 길게 누르면 AE/AF 잠금, 초점 표시 후 위아래로 끌면 노출 조절, 위로 쓸어 올리면 빠른 설정.\n줌: 버튼을 탭하거나 좌우로 끌면 다이얼이 나타납니다. 전면 카메라는 0.8(넓게)·1×(표준)를 지원합니다.\n햅틱은 조용한 곳에서 진동음이 들릴 수 있어 기본으로 꺼져 있습니다.")
+                        Text("셔터: 탭하면 촬영, 길게 누르면 연속 촬영. 볼륨 버튼·카메라 제어 버튼으로도 촬영할 수 있습니다.\n미리보기: 탭하면 초점, 길게 누르면 AE/AF 잠금, 초점 표시 후 위아래로 끌면 노출 조절.\n빠른 옵션(비율·타이머·격자·형식·설정)은 화면 위쪽에 항상 표시됩니다.\n줌: 버튼을 탭하거나 좌우로 끌면 다이얼이 나타납니다. 전면 카메라는 0.8(넓게)·1×(표준)를 지원합니다.\n촬영 햅틱은 조용한 곳에서 진동음이 들릴 수 있어 기본으로 꺼져 있습니다. 줌 다이얼 햅틱은 눈금·렌즈 배율을 지날 때 울리며 기본으로 켜져 있습니다(녹화 중에는 울리지 않음).")
                     }
                 }
 
@@ -148,7 +150,7 @@ struct SettingsView: View {
             if camera.shutterSuppressionSupported {
                 return "설정에 따라 카메라 영상 스트림의 프레임을 그대로 저장합니다. 사진 촬영 API를 쓰지 않으므로 셔터음이 원천적으로 발생하지 않습니다."
             }
-            return "이 기기는 시스템 셔터음이 강제되는 기기(한국·일본 판매 모델 등)이거나 iOS 17이므로, 카메라 영상 스트림의 프레임을 그대로 저장합니다. 사진 촬영 API를 쓰지 않아 지역과 관계없이 셔터음이 발생하지 않으며, 기기가 영상 스트림으로 제공하는 최대 해상도로 저장됩니다."
+            return "이 기기는 시스템 셔터음이 강제되는 기기(한국·일본 판매 모델 등)이거나 iOS 17이므로, 카메라 영상 스트림의 프레임을 그대로 저장합니다. 사진 촬영 API를 쓰지 않아 지역과 관계없이 셔터음이 발생하지 않으며, 기기가 영상 스트림으로 제공하는 최대 해상도로 저장됩니다. 24MP·48MP는 사진 촬영 API로만 만들 수 있어 이 기기에서는 셔터음 없이 저장할 수 없습니다(아래 진단 정보에서 두 최대 해상도를 확인할 수 있습니다)."
         }
     }
 }

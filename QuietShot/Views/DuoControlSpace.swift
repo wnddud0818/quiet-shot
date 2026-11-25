@@ -15,7 +15,10 @@ struct DuoControlSpace {
     let sceneDegrees: Double
     let fixedToScene: CGAffineTransform
     let viewfinder: CGRect
+    /// 버튼이 들어가는 안전 영역 (세로 막대·홈 인디케이터 제외)
     let controls: CGRect
+    /// 조작부 배경과 하단 촬영 줄이 쓰는 영역. 접는 선 반대쪽의 화면 가장자리까지 넓힌다.
+    let controlsBleed: CGRect
     let split: Bool
     let sideRail: Bool
 
@@ -52,8 +55,10 @@ struct DuoControlSpace {
         size = CGRect(origin: .zero, size: sceneSize).applying(inverse).size
         let safe = safeBounds.applying(inverse)
         // 홈 인디케이터가 다른 가장자리로 옮겨가도 같은 자세의 버튼은 움직이지 않는다.
-        let margins = retained?.margins ?? EdgeInsets(top: safe.minY, leading: safe.minX,
-                                                      bottom: size.height - safe.maxY, trailing: size.width - safe.maxX)
+        // 기준 방향으로 돌아오면 현재 안전 영역으로 다시 맞춘다.
+        let current = EdgeInsets(top: safe.minY, leading: safe.minX,
+                                 bottom: size.height - safe.maxY, trailing: size.width - safe.maxX)
+        let margins = relative != 0 ? (retained?.margins ?? current) : current
         anchor = Anchor(posture: posture, referenceDegrees: reference, margins: margins)
         let bounds = CGRect(x: margins.leading, y: margins.top,
                             width: max(0, size.width - margins.leading - margins.trailing),
@@ -64,15 +69,18 @@ struct DuoControlSpace {
             if horizontal {
                 viewfinder = CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: fold.minY - bounds.minY)
                 controls = CGRect(x: bounds.minX, y: fold.maxY, width: bounds.width, height: bounds.maxY - fold.maxY)
+                controlsBleed = CGRect(x: 0, y: fold.maxY, width: size.width, height: size.height - fold.maxY)
             } else {
                 viewfinder = CGRect(x: bounds.minX, y: bounds.minY, width: fold.minX - bounds.minX, height: bounds.height)
                 controls = CGRect(x: fold.maxX, y: bounds.minY, width: bounds.maxX - fold.maxX, height: bounds.height)
+                controlsBleed = CGRect(x: fold.maxX, y: 0, width: size.width - fold.maxX, height: size.height)
             }
             sideRail = !horizontal && controls.width >= 250
         } else {
             split = false
             viewfinder = bounds
             controls = bounds
+            controlsBleed = CGRect(origin: .zero, size: size)
             sideRail = posture != .closed && bounds.width >= 250
         }
     }

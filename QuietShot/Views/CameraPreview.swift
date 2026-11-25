@@ -11,7 +11,7 @@ enum HardwareShutterPhase {
 }
 
 /// 본 화면 카메라 미리보기 (프레임을 직접 그리는 FramePreviewView) + 카메라 제스처.
-/// - 탭: 초점/노출, 길게 누르기: AE/AF 잠금, 두 손가락 핀치: 줌, 한 손가락 위아래 드래그: 노출 또는 빠른 설정
+/// - 탭: 초점/노출, 길게 누르기: AE/AF 잠금, 두 손가락 핀치: 줌, 한 손가락 위아래 드래그: 노출
 struct CameraPreview: UIViewRepresentable {
     let camera: CameraController
     let source: CameraController.PreviewSource
@@ -143,6 +143,47 @@ struct CameraWindowObserver: UIViewRepresentable {
                     self.onInterfaceOrientationChange?(orientation)
                 }
             }
+        }
+    }
+}
+
+/// 화면을 세로로 고정해도 iPhone Duo 안쪽 화면은 기기 방향을 따라 창을 돌린다.
+/// 이때 시스템 회전 애니메이션을 끄고 바뀐 방향을 같은 순간에 알려, 버튼을 기기에 고정하는
+/// 반대 회전(DuoControlPlacement)과 함께 화면이 돌아가는 모션 없이 바로 전환한다.
+/// 접거나 펼 때의 크기 변화(회전 없음)는 시스템 애니메이션을 그대로 둔다.
+struct RotationTransitionGuard: UIViewControllerRepresentable {
+    let onInterfaceOrientationChange: (UIInterfaceOrientation) -> Void
+
+    func makeUIViewController(context: Context) -> Controller {
+        Controller()
+    }
+
+    func updateUIViewController(_ controller: Controller, context: Context) {
+        controller.onInterfaceOrientationChange = onInterfaceOrientationChange
+    }
+
+    final class Controller: UIViewController {
+        var onInterfaceOrientationChange: ((UIInterfaceOrientation) -> Void)?
+
+        override func loadView() {
+            let view = UIView()
+            view.backgroundColor = .clear
+            view.isUserInteractionEnabled = false
+            self.view = view
+        }
+
+        override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+            super.viewWillTransition(to: size, with: coordinator)
+            guard !coordinator.targetTransform.isIdentity else { return }
+            let animationsWereEnabled = UIView.areAnimationsEnabled
+            UIView.setAnimationsEnabled(false)
+            coordinator.animate(alongsideTransition: { [weak self] _ in
+                guard let orientation = self?.view.window?.windowScene?.effectiveGeometry.interfaceOrientation,
+                      orientation != .unknown else { return }
+                self?.onInterfaceOrientationChange?(orientation)
+            }, completion: { _ in
+                UIView.setAnimationsEnabled(animationsWereEnabled)
+            })
         }
     }
 }
