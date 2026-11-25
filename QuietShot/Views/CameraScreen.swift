@@ -28,7 +28,6 @@ private struct CameraContent: View {
     @AppStorage(SettingsKey.saveFormat) private var saveFormat: SaveFormat = .heic
 
     @State private var showSettings = false
-    @State private var drawerOpen = false
 
     @State private var focus: FocusMark?
     @State private var focusDimmed = false
@@ -100,9 +99,12 @@ private struct CameraContent: View {
                 onInterfaceOrientationChange: { interfaceOrientation = $0 }
             )
         }
+        .background {
+            // 세로 고정을 따르지 않는 안쪽 화면에서도 창이 도는 애니메이션 없이 바로 전환한다.
+            RotationTransitionGuard(onInterfaceOrientationChange: { interfaceOrientation = $0 })
+        }
         .modifier(DuoHingeObserver(isClosed: $hingeReading))
         .onChange(of: hingeClosed) {
-            drawerOpen = false
             showSettings = false
             showDuoSettings = false
         }
@@ -255,8 +257,15 @@ private struct CameraContent: View {
             $0.offsetBy(dx: safeBounds.minX, dy: safeBounds.minY).applying(inverse)
         }
         let controls = space.controls
+        let bleed = space.controlsBleed
         let viewfinder = space.viewfinder
-        let insets = fixedRegions.occlusionInsets(in: controls)
+        let occlusion = fixedRegions.occlusionInsets(in: controls)
+        // 화면 가장자리에서 버튼이 피해야 하는 거리 (세로 막대·홈 인디케이터 + 카메라 구멍).
+        // 배경과 아래쪽 촬영 줄은 화면 끝까지 쓰고, 버튼만 이 여백을 지킨다.
+        let safeArea = EdgeInsets(top: controls.minY - bleed.minY + occlusion.top,
+                                  leading: controls.minX - bleed.minX + occlusion.leading,
+                                  bottom: bleed.maxY - controls.maxY + occlusion.bottom,
+                                  trailing: bleed.maxX - controls.maxX + occlusion.trailing)
         var image = viewfinder
         if !space.split {
             image = CGRect(origin: .zero, size: space.size)
@@ -265,7 +274,7 @@ private struct CameraContent: View {
                 let fixedAspect = abs(space.sceneDegrees) == 90 ? 1 / aspect : aspect
                 image.size.width -= FramePreviewMath.trailingPadding(
                     viewport: image.size, aspect: fixedAspect, railWidth: railWidth,
-                    safeAreaInset: image.maxX - controls.maxX + insets.trailing
+                    safeAreaInset: safeArea.trailing
                 )
             }
         }
@@ -282,8 +291,12 @@ private struct CameraContent: View {
                         .frame(width: viewfinder.width, height: viewfinder.height)
                         .allowsHitTesting(false)
                         .overlay(alignment: .top) {
-                            duoTools.padding(.horizontal, 12).padding(.top, 8)
-                                .padding(fixedRegions.occlusionInsets(in: viewfinder))
+                            VStack(spacing: 4) {
+                                duoTools
+                                quickControls
+                            }
+                            .padding(.horizontal, 12).padding(.top, 8)
+                            .padding(fixedRegions.occlusionInsets(in: viewfinder))
                         }
                         .overlay(alignment: .bottom) {
                             zoomControl.padding(8).padding(fixedRegions.occlusionInsets(in: viewfinder))
@@ -292,23 +305,26 @@ private struct CameraContent: View {
                         .position(x: viewfinder.midX, y: viewfinder.midY)
                 }
                 DuoCaptureControls(
-                    landscape: space.sideRail, railWidth: railWidth,
+                    landscape: space.sideRail, railWidth: railWidth, safeArea: safeArea,
                     tools: Group { if !space.split { duoTools } },
+                    options: Group { if !space.split { quickControls } },
                     lenses: Group { if !space.split { zoomControl } }, modes: modeSelector,
                     shutter: shutter, gallery: galleryControl, flip: flipControl
                 )
-                .padding(insets)
                 .background(alignment: .bottom) {
                     LinearGradient(colors: [.clear, .black.opacity(0.72)], startPoint: .top, endPoint: .bottom)
-                        .frame(height: space.sideRail ? 96 : 184).allowsHitTesting(false)
+                        .frame(height: space.sideRail ? 96 + safeArea.bottom : 184 + safeArea.bottom)
+                        .allowsHitTesting(false)
                 }
                 .background(alignment: .top) {
-                    LinearGradient(colors: [.black.opacity(0.5), .clear], startPoint: .top, endPoint: .bottom)
-                        .frame(height: 68).allowsHitTesting(false)
+                    if !space.split {
+                        LinearGradient(colors: [.black.opacity(0.5), .clear], startPoint: .top, endPoint: .bottom)
+                            .frame(height: 140 + safeArea.top).allowsHitTesting(false)
+                    }
                 }
-                .frame(width: controls.width, height: controls.height)
+                .frame(width: bleed.width, height: bleed.height)
                 .clipped()
-                .position(x: controls.midX, y: controls.midY)
+                .position(x: bleed.midX, y: bleed.midY)
             }
             .modifier(DuoControlPlacement(space: space))
             .opacity(camera.isSystemControlFullscreen ? 0 : 1)
@@ -317,15 +333,12 @@ private struct CameraContent: View {
     }
 
     private var duoTools: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 6) {
-                torchButton
-                Spacer(minLength: 0)
-                captureStatus
-                Spacer(minLength: 0)
-                statusPill(vertical: false)
-            }
-            if drawerOpen { quickControls }
+        HStack(spacing: 6) {
+            torchButton
+            Spacer(minLength: 0)
+            captureStatus
+            Spacer(minLength: 0)
+            statusPill(vertical: false)
         }
     }
 
@@ -348,7 +361,6 @@ private struct CameraContent: View {
 
     private func openSettings() {
         cancelHardwareHold()
-        drawerOpen = false
         if usesFixedControls { showDuoSettings = true } else { showSettings = true }
     }
 
@@ -409,47 +421,39 @@ private struct CameraContent: View {
         }
     }
 
-    /// 무음 표시 + 해상도 + 빠른 설정 열기
+    /// 무음 표시 + 저장 해상도 (빠른 옵션은 항상 펼쳐져 있으므로 누르는 동작은 없음)
     private func statusPill(vertical: Bool) -> some View {
         let glyphAngle = usesFixedControls ? iconAngle : .zero
-        return Button {
-            Haptics.selection()
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) { drawerOpen.toggle() }
-        } label: {
-            HStack(spacing: 6) {
-                if camera.captureMode == .video {
-                    Image(systemName: "video.fill")
-                        .rotationEffect(glyphAngle)
-                    Text("동영상")
-                        .rotationEffect(glyphAngle)
-                } else {
-                    Image(systemName: "speaker.slash.fill")
-                        .rotationEffect(glyphAngle)
-                    Text(camera.megapixelText(for: aspectRatio)).monospacedDigit().rotationEffect(glyphAngle)
-                }
-                if camera.captureMode == .photo, captureTimer != .off {
-                    Image(systemName: "timer")
-                        .rotationEffect(glyphAngle)
-                    Text("\(captureTimer.rawValue)")
-                        .monospacedDigit()
-                        .rotationEffect(glyphAngle)
-                }
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 10, weight: .bold))
-                    .rotationEffect(.degrees(glyphAngle.degrees + (drawerOpen ? 180 : 0)))
+        return HStack(spacing: 6) {
+            if camera.captureMode == .video {
+                Image(systemName: "video.fill")
+                    .rotationEffect(glyphAngle)
+                Text("동영상")
+                    .rotationEffect(glyphAngle)
+            } else {
+                Image(systemName: "speaker.slash.fill")
+                    .rotationEffect(glyphAngle)
+                Text(camera.megapixelText(for: aspectRatio)).monospacedDigit().rotationEffect(glyphAngle)
             }
-            .font(.system(size: 13, weight: .semibold, design: .rounded))
-            .frame(minHeight: usesFixedControls ? 32 : nil)
-            .foregroundStyle(drawerOpen ? Color.black : Color.white)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(Capsule().fill(drawerOpen ? Theme.accent : Theme.chip))
-            .fixedSize()
-            .rotationEffect(vertical ? .degrees(-90) : .zero)
-            .frame(width: vertical ? 40 : nil, height: vertical ? 180 : nil)
+            if camera.captureMode == .photo, captureTimer != .off {
+                Image(systemName: "timer")
+                    .rotationEffect(glyphAngle)
+                Text("\(captureTimer.rawValue)")
+                    .monospacedDigit()
+                    .rotationEffect(glyphAngle)
+            }
         }
-        .buttonStyle(PressableStyle())
-        .accessibilityLabel(camera.captureMode == .video ? "동영상 빠른 설정" : "무음 촬영, \(camera.resolutionText(for: aspectRatio)). 빠른 설정")
+        .font(.system(size: 13, weight: .semibold, design: .rounded))
+        .frame(minHeight: usesFixedControls ? 32 : nil)
+        .foregroundStyle(Color.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(Capsule().fill(Theme.chip))
+        .fixedSize()
+        .rotationEffect(vertical ? .degrees(-90) : .zero)
+        .frame(width: vertical ? 40 : nil, height: vertical ? 180 : nil)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(camera.captureMode == .video ? "동영상" : "무음 촬영, \(camera.resolutionText(for: aspectRatio))")
     }
 
     // MARK: - 미리보기
@@ -526,13 +530,10 @@ private struct CameraContent: View {
     private var topOverlay: some View {
         VStack(spacing: 8) {
             captureStatus
-            if drawerOpen {
-                quickControls
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
+            quickControls
+                .opacity(camera.isSystemControlFullscreen ? 0 : 1)
         }
         .padding(.top, 10)
-        .animation(.spring(response: 0.32, dampingFraction: 0.85), value: drawerOpen)
     }
 
     private var captureStatus: some View {
@@ -775,10 +776,6 @@ private struct CameraContent: View {
     }
 
     private func handleTap(_ devicePoint: CGPoint) {
-        if drawerOpen {
-            withAnimation { drawerOpen = false }
-            return
-        }
         camera.focus(at: devicePoint, lock: false)
         showFocus(at: devicePoint, locked: false)
     }
@@ -800,7 +797,7 @@ private struct CameraContent: View {
         }
     }
 
-    /// 초점 표시가 있으면 위아래 드래그 = 노출 보정, 없으면 위로 = 빠른 설정 열기 / 아래로 = 닫기
+    /// 초점 표시가 떠 있을 때 위아래로 끌면 노출 보정
     private func handlePan(_ state: UIGestureRecognizer.State, _ translation: CGSize) {
         switch state {
         case .began:
@@ -814,13 +811,6 @@ private struct CameraContent: View {
                 camera.setExposureBias(start - Float(translation.height / 110))
             }
         default:
-            if exposureDragStart == nil, abs(translation.height) > abs(translation.width) {
-                if translation.height < -40 {
-                    withAnimation { drawerOpen = true }
-                } else if translation.height > 40 {
-                    withAnimation { drawerOpen = false }
-                }
-            }
             if exposureDragStart != nil {
                 exposureDragStart = nil
                 scheduleFocusFade()

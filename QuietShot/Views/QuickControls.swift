@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 상단 배지를 누르거나 미리보기를 위로 쓸어 올리면 나타나는 빠른 설정 줄.
+/// 화면 위쪽에 항상 표시되는 빠른 설정 줄.
 /// 항목을 누르면 그 자리에서 선택지가 펼쳐집니다.
 struct QuickControls: View {
     @ObservedObject var camera: CameraController
