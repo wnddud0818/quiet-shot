@@ -49,7 +49,8 @@ private struct CameraContent: View {
     @State private var controlAnchor: DuoControlSpace.Anchor?
     @State private var outerCameraFacesView: Bool?
     @State private var showDuoSettings = false
-    @State private var outerPreviewEnabled = true
+    /// 커버 화면 미리보기는 펼친 상태에서 버튼을 눌러야 켜진다 (접으면 다시 꺼짐)
+    @State private var outerPreviewEnabled = false
     @State private var outerPreviewAvailable = false
 
     init(size: CGSize, regions: DuoRegions, safeInsets: EdgeInsets) {
@@ -104,9 +105,10 @@ private struct CameraContent: View {
             RotationTransitionGuard(onInterfaceOrientationChange: { interfaceOrientation = $0 })
         }
         .modifier(DuoHingeObserver(isClosed: $hingeReading))
-        .onChange(of: hingeClosed) {
+        .onChange(of: hingeClosed) { _, closed in
             showSettings = false
             showDuoSettings = false
+            if closed == true { outerPreviewEnabled = false }
         }
         .statusBarHidden()
         .persistentSystemOverlays(.hidden)
@@ -564,6 +566,7 @@ private struct CameraContent: View {
                 displayZoom: camera.displayZoom,
                 iconAngle: iconAngle,
                 showsFixedZoom: duoClosed || innerDisplay || regions.fold != nil,
+                hapticsEnabled: camera.recordingState == .idle,
                 onSelect: { camera.selectZoomPreset($0) },
                 onContinuousZoom: { camera.setZoom(display: $0) }
             )

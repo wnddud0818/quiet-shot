@@ -316,6 +316,9 @@ final class CameraController: NSObject, ObservableObject {
         if enabled {
             guard microphoneInput == nil, let mic = AVCaptureDevice.default(for: .audio),
                   let input = try? AVCaptureDeviceInput(device: mic), session.canAddInput(input) else { return }
+            // 마이크 입력이 켜져 있으면 iOS가 햅틱을 막으므로, 녹화 전 줌 다이얼 햅틱을 위해 허용한다.
+            // (녹화 중에는 다이얼 햅틱을 내지 않아 진동 소리가 담기지 않음)
+            try? AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
             session.addInput(input)
             microphoneInput = input
         } else if let input = microphoneInput {
@@ -1145,6 +1148,14 @@ final class CameraController: NSObject, ObservableObject {
             "포맷: \(format.width)×\(format.height)",
             "출력 회전: \(Int(connectionAngle))°",
         ]
+        // 무음으로 저장할 수 있는 최대(영상 스트림)와 사진 촬영 API 최대(셔터음 강제 기기에서는 소리 남)
+        if let stream = FormatSelector.bestFrameFormat(for: device).map(FormatSelector.videoDimensions(of:)) {
+            lines.append("영상 스트림 최대: \(stream.width)×\(stream.height) (\(megapixels(stream))MP)")
+        }
+        if let photo = device.formats.compactMap(FormatSelector.maxPhotoDimensions(of:))
+            .max(by: { FormatSelector.area($0) < FormatSelector.area($1) }) {
+            lines.append("사진 API 최대: \(photo.width)×\(photo.height) (\(megapixels(photo))MP)")
+        }
         if #available(iOS 26.0, *) {
             let supported = device.activeFormat.supportedDynamicAspectRatios.map { $0.rawValue }
             if !supported.isEmpty {
@@ -1152,6 +1163,10 @@ final class CameraController: NSObject, ObservableObject {
             }
         }
         return lines
+    }
+
+    private static func megapixels(_ dimensions: CMVideoDimensions) -> Int {
+        Int((Double(FormatSelector.area(dimensions)) / 1_000_000).rounded(.down))
     }
 
     static func normalizedAngle(_ angle: CGFloat) -> CGFloat {

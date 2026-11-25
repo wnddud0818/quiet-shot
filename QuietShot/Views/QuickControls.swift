@@ -9,7 +9,7 @@ struct QuickControls: View {
     @Binding var showGrid: Bool
     @Binding var saveFormat: SaveFormat
     let iconAngle: Angle
-    /// iPhone Duo 바깥 화면 미리보기 (사용할 수 없으면 nil → 버튼 숨김)
+    /// iPhone Duo 커버(바깥) 화면 미리보기. 펼쳐서 시스템이 표시할 수 있을 때만 값이 있다 (nil → 버튼 숨김)
     var outerPreview: Binding<Bool>? = nil
     let onOpenSettings: () -> Void
 
@@ -58,6 +58,16 @@ struct QuickControls: View {
 
     private var mainRow: some View {
         optionStrip {
+            if let outerPreview {
+                // 기본은 꺼짐. 펼친 상태에서 이 버튼을 눌러야 커버 화면에 미리보기가 켜진다.
+                item(icon: "rectangle.on.rectangle", caption: "커버 화면", active: outerPreview.wrappedValue) {
+                    let enabled = !outerPreview.wrappedValue
+                    outerPreview.wrappedValue = enabled
+                    camera.toast = enabled ? "커버 화면 미리보기 켬" : "커버 화면 미리보기 끔"
+                }
+                .accessibilityLabel("커버 화면 미리보기")
+                .accessibilityValue(outerPreview.wrappedValue ? "켬" : "끔")
+            }
             if camera.captureMode == .video {
                 MovieOptions(camera: camera, compact: true, iconAngle: iconAngle)
             } else {
@@ -74,11 +84,6 @@ struct QuickControls: View {
             if camera.captureMode == .photo {
                 item(icon: "photo", caption: saveFormat == .heic ? "HEIC" : "JPEG", active: false) {
                     saveFormat = saveFormat == .heic ? .jpeg : .heic
-                }
-            }
-            if let outerPreview {
-                item(icon: "rectangle.on.rectangle", caption: "바깥 화면", active: outerPreview.wrappedValue) {
-                    outerPreview.wrappedValue.toggle()
                 }
             }
             item(icon: "gearshape", caption: "설정", active: false, action: onOpenSettings)
